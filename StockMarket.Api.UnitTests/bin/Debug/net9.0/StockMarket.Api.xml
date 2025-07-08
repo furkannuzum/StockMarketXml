@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>StockMarket.Api</name>
+    </assembly>
+    <members>
+        <member name="M:StockMarket.Api.Controllers.StocksController.QueryStocksWithXDocument(System.Decimal)">
+            <summary>
+            Retrieves all stocks, filters them using XDocument (LINQ to XML),
+            and returns stocks with price greater than a specified value.
+            Requires authentication.
+            </summary>
+            <param name="minPrice">The minimum price to filter stocks by (e.g., 100). Default is 0.</param>
+            <returns>An XML feed containing filtered stock data.</returns>
+        </member>
+    </members>
+</doc>

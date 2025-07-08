@@ -1,0 +1,15 @@
+<!-- StockMarket.Api/stockdata.dtd -->
+<!ELEMENT StockDataFeed (Stock*)>
+<!ATTLIST StockDataFeed
+          xmlns CDATA #IMPLIED>
+
+<!ELEMENT Stock (CompanyName, CurrentPrice, Change, PercentChange, Volume, LastUpdated, Description)>
+<!ATTLIST Stock TickerSymbol CDATA #REQUIRED>
+
+<!ELEMENT CompanyName (#PCDATA)>
+<!ELEMENT CurrentPrice (#PCDATA)>
+<!ELEMENT Change (#PCDATA)>
+<!ELEMENT PercentChange (#PCDATA)>
+<!ELEMENT Volume (#PCDATA)>
+<!ELEMENT LastUpdated (#PCDATA)>
+<!ELEMENT Description (#PCDATA)>

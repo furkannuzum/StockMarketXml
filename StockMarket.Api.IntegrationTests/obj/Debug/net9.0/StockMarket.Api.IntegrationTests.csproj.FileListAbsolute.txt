@@ -1,0 +1,8 @@
+C:\Users\Fürkan\Desktop\StockMarketXmlProject\StockMarket.Api.IntegrationTests\bin\Debug\net9.0\.msCoverageSourceRootsMapping_StockMarket.Api.IntegrationTests
+C:\Users\Fürkan\Desktop\StockMarketXmlProject\StockMarket.Api.IntegrationTests\bin\Debug\net9.0\CoverletSourceRootsMapping_StockMarket.Api.IntegrationTests
+C:\Users\Fürkan\Desktop\StockMarketXmlProject\StockMarket.Api.IntegrationTests\obj\Debug\net9.0\StockMarket.Api.IntegrationTests.csproj.AssemblyReference.cache
+C:\Users\Fürkan\Desktop\StockMarketXmlProject\StockMarket.Api.IntegrationTests\obj\Debug\net9.0\MvcTestingAppManifest.json
+C:\Users\Fürkan\Desktop\StockMarketXmlProject\StockMarket.Api.IntegrationTests\obj\Debug\net9.0\StockMarket.Api.IntegrationTests.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Fürkan\Desktop\StockMarketXmlProject\StockMarket.Api.IntegrationTests\obj\Debug\net9.0\StockMarket.Api.IntegrationTests.AssemblyInfoInputs.cache
+C:\Users\Fürkan\Desktop\StockMarketXmlProject\StockMarket.Api.IntegrationTests\obj\Debug\net9.0\StockMarket.Api.IntegrationTests.AssemblyInfo.cs
+C:\Users\Fürkan\Desktop\StockMarketXmlProject\StockMarket.Api.IntegrationTests\obj\Debug\net9.0\StockMarket.Api.IntegrationTests.csproj.CoreCompileInputs.cache

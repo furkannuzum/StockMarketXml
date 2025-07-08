@@ -1,0 +1,259 @@
+html, body {
+    height: 100%; }
+
+body {
+    display: flex;
+    flex-direction: column;
+
+    /* Zaten var olan body stillerin aynı kalacak */
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 0;
+    background-image: url('images/stock.jpeg');
+    background-size: cover;
+    background-position: center center;
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+    color: #333;
+}
+
+header {
+    /* YENİ: Yarı şeffaf koyu arka plan */
+    background: rgba(51, 51, 51, 0.85); /* #333'ün rgba karşılığı ve %85 opaklık */
+    color: #fff;
+    padding: 1rem 0;
+    text-align: center;
+}
+
+footer {
+    flex-shrink: 0;
+
+    /* Zaten var olan footer stillerin aynı kalacak */
+    text-align: center;
+    padding: 20px;
+    background: rgba(51, 51, 51, 0.85);
+    color: #fff;
+    margin-top: 30px;
+}
+
+header h1 {
+    margin: 0;
+}
+
+main {
+    /* flex: 1 0 auto;  */
+
+    /* Zaten var olan main stillerin aynı kalacak */
+    max-width: 960px;
+    margin: 20px auto;
+    padding: 0 20px;
+}
+.spacer {
+    flex: 1 0 auto;
+}
+/* section {
+    background: #fff;
+    padding: 20px;
+    margin-bottom: 20px;
+    border-radius: 5px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+} */
+section {
+    /* Mevcut stiller: padding, margin-bottom, border-radius, box-shadow */
+    padding: 20px;
+    margin-bottom: 20px;
+    border-radius: 5px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    
+    /* YENİ: Yarı şeffaf beyaz arka plan */
+    background: rgba(255, 255, 255, 0.9); /* %90 opaklıkta beyaz. 0.8 veya 0.85 de deneyebilirsin. */
+}
+h2, h3 {
+    color: #333;
+}
+
+.form-container {
+    margin-bottom: 20px;
+    padding: 15px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+label {
+    display: block;
+    margin-bottom: 5px;
+}
+
+input[type="text"],
+input[type="password"] {
+    width: calc(100% - 22px);
+    padding: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+button {
+    display: inline-block;
+    background: #5cb85c;
+    color: #fff;
+    padding: 10px 15px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 1em;
+    margin-right: 10px;
+    margin-bottom: 10px;
+}
+
+button:hover {
+    background: #4cae4c;
+}
+
+#logout-button {
+    background: #d9534f;
+}
+#logout-button:hover {
+    background: #c9302c;
+}
+
+.controls input[type="text"]{
+    width: auto; /* Butonlarla aynı hizada olması için */
+}
+
+.output-area {
+    margin-top: 20px;
+    padding: 15px;
+    background-color: #e9e9e9;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    white-space: pre-wrap; /* XML'in düzgün görünmesi için */
+    word-wrap: break-word;
+    min-height: 100px;
+}
+
+.message {
+    margin-top: 10px;
+    font-weight: bold;
+}
+.message.success {
+    color: green;
+}
+.message.error {
+    color: red;
+}
+
+table.stock-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 15px;
+}
+
+table.stock-table th, table.stock-table td {
+    border: 1px solid #ddd;
+    padding: 8px;
+    text-align: left;
+}
+
+table.stock-table th {
+    background-color: #f0f0f0;
+}
+
+/* footer {
+    text-align: center;
+    padding: 20px;
+    background: #333;
+    color: #fff;
+    margin-top: 30px;
+} */
+/* style.css sonuna eklenebilir */
+#tracked-symbols-list li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 0;
+    border-bottom: 1px dotted #eee;
+}
+#tracked-symbols-list li:last-child {
+    border-bottom: none;
+}
+.untrack-btn {
+    background-color: #f0ad4e; /* Turuncu */
+    padding: 5px 10px;
+    font-size: 0.9em;
+    margin-left: 10px;
+}
+.untrack-btn:hover {
+    background-color: #eea236;
+}
+/* Modal Arka Planı */
+.modal {
+    display: none; /* Başlangıçta gizli */
+    position: fixed; /* Sayfanın üzerinde kalmasını sağlar */
+    z-index: 1000; /* Diğer tüm elementlerin üzerinde olmasını sağlar */
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    overflow: auto; /* İçerik sığmazsa scroll oluşturur */
+    background-color: rgba(0, 0, 0, 0.7); /* Yarı şeffaf siyah arka plan */
+    /* Dikey ve yatay ortalama için Flexbox */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Modal İçerik Kutusu */
+.modal-content {
+    position: relative;
+    background-color: #1e1e1e; /* Widget'ın karanlık temasına uygun bir renk */
+    color: #f1f1f1;
+    margin: auto; /* Flexbox ile zaten ortalanıyor ama ek olarak kalabilir */
+    padding: 20px;
+    border: 1px solid #555;
+    border-radius: 8px;
+    width: 85%; /* Ekran genişliğinin %85'ini kaplasın */
+    max-width: 960px; /* Ama en fazla 960px olsun */
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.5);
+    /* Animasyonlu giriş */
+    animation-name: animatetop;
+    animation-duration: 0.4s;
+}
+
+/* Giriş Animasyonu */
+@keyframes animatetop {
+    from {top: -300px; opacity: 0}
+    to {top: 0; opacity: 1}
+}
+
+/* Kapatma Butonu */
+.close-button {
+    color: #aaa;
+    position: absolute;
+    top: 10px;
+    right: 25px;
+    font-size: 32px;
+    font-weight: bold;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.close-button:hover,
+.close-button:focus {
+    color: #fff;
+    text-decoration: none;
+}
+
+/* Modal Başlığı */
+#chart-modal-title {
+    margin-top: 0;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #444;
+}
+
+/* TradingView Widget Container'ı */
+#chart-container {
+    height: 550px; /* Grafik için daha geniş bir alan */
+    margin-top: 15px;
+}

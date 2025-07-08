@@ -1,0 +1,2756 @@
+// StockMarket.Api/Controllers/AuthController.cs
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.IdentityModel.Tokens;
+using StockMarket.Api.Models;
+using StockMarket.Api.Services;
+using System;
+using System.Collections.Generic;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration; // IConfiguration için
+using BCrypt.Net; // BCrypt için
+
+namespace StockMarket.Api.Controllers
+{
+    [ApiController]
+    [Route("api/v1/auth")]
+    [Produces("application/json")] // Auth endpoint'leri genellikle JSON döner, XML değil.
+    public class AuthController : ControllerBase
+    {
+        private readonly IUserRepository _userRepository;
+        private readonly IConfiguration _configuration;
+        private readonly ILogger<AuthController> _logger;
+
+        public AuthController(IUserRepository userRepository, IConfiguration configuration, ILogger<AuthController> logger)
+        {
+            _userRepository = userRepository;
+            _configuration = configuration;
+            _logger = logger;
+        }
+
+        // POST: api/v1/auth/register
+        [HttpPost("register")]
+        [ProducesResponseType(StatusCodes.Status201Created)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> Register([FromBody] UserRegisterDto registerDto)
+        {
+            if (!ModelState.IsValid)
+            {
+                return BadRequest(ModelState);
+            }
+
+            try
+            {
+                var existingUser = await _userRepository.GetUserByUsernameAsync(registerDto.Username);
+                if (existingUser != null)
+                {
+                    _logger.LogWarning("Kullanıcı adı '{Username}' zaten mevcut.", registerDto.Username);
+                    return BadRequest(new { message = $"Kullanıcı adı '{registerDto.Username}' zaten kullanılıyor." });
+                }
+
+                // Şifreyi hash'le
+                string passwordHash = BCrypt.Net.BCrypt.HashPassword(registerDto.Password);
+
+                var newUser = new User
+                {
+                    Username = registerDto.Username,
+                    PasswordHash = passwordHash,
+                    Role = "User" // Varsayılan rol
+                };
+
+                await _userRepository.AddUserAsync(newUser);
+                _logger.LogInformation("Kullanıcı '{Username}' başarıyla kaydedildi.", newUser.Username);
+
+                // Kayıt sonrası ne döneceğimize karar verebiliriz.
+                // Genellikle 201 Created veya kullanıcı bilgileri (şifresiz) dönebilir.
+                // Şimdilik sadece 201 dönelim.
+                return CreatedAtAction(nameof(Login), new { username = newUser.Username }, new { message = "Kullanıcı başarıyla oluşturuldu." });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Register endpoint'inde hata oluştu.");
+                return StatusCode(StatusCodes.Status500InternalServerError, new { message = "Kayıt sırasında bir hata oluştu." });
+            }
+        }
+
+        // POST: api/v1/auth/login
+        [HttpPost("login")]
+        [ProducesResponseType(typeof(LoginResponseDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+       public async Task<IActionResult> Login([FromBody] UserLoginDto loginDto)
+        {
+            if (!ModelState.IsValid)
+            {
+                return BadRequest(ModelState);
+            }
+
+            try
+            {
+                var user = await _userRepository.GetUserByUsernameAsync(loginDto.Username);
+
+                if (user == null || !BCrypt.Net.BCrypt.Verify(loginDto.Password, user.PasswordHash))
+                {
+                    _logger.LogWarning("Kullanıcı adı veya şifre hatalı: {Username}", loginDto.Username);
+                    return Unauthorized(new { message = "Kullanıcı adı veya şifre hatalı." });
+                }
+
+                var token = GenerateJwtToken(user);
+                // === LOGLAMA GÜNCELLENDİ: Rol bilgisini de logla ===
+                _logger.LogInformation("Kullanıcı '{Username}' başarıyla giriş yaptı. Rol: {Role}", user.Username, user.Role);
+
+                // === YANIT GÜNCELLENDİ: LoginResponseDto'ya Rol eklendi ===
+                return Ok(new LoginResponseDto
+                {
+                    Token = token,
+                    Username = user.Username,
+                    Role = user.Role // <-- EKSİK OLAN KISIM BUYDU! user nesnesinden rolü alıp DTO'ya ekliyoruz.
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Login endpoint'inde hata oluştu.");
+                return StatusCode(StatusCodes.Status500InternalServerError, new { message = "Giriş sırasında bir hata oluştu." });
+            }
+        }
+
+        private string GenerateJwtToken(User user)
+        {
+            var jwtKey = _configuration["Jwt:Key"];
+            var jwtIssuer = _configuration["Jwt:Issuer"];
+            var jwtAudience = _configuration["Jwt:Audience"];
+            var tokenValidityInMinutes = _configuration.GetValue<int>("Jwt:TokenValidityInMinutes");
+
+            if (string.IsNullOrEmpty(jwtKey) || string.IsNullOrEmpty(jwtIssuer) || string.IsNullOrEmpty(jwtAudience))
+            {
+                _logger.LogError("JWT ayarları (Key, Issuer, Audience) appsettings.json dosyasında eksik veya hatalı.");
+                throw new InvalidOperationException("JWT ayarları yapılandırılmamış.");
+            }
+
+            var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
+            var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
+
+            var claims = new List<Claim>
+            {
+                new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()), // Subject (kullanıcı ID'si)
+                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()), // JWT ID (her token için benzersiz)
+                new Claim(JwtRegisteredClaimNames.Iat, DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(), ClaimValueTypes.Integer64), // Issued at
+                new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()), // ASP.NET Core'un User.Identity.NameIdentifier'ı için
+                new Claim(ClaimTypes.Name, user.Username), // ASP.NET Core'un User.Identity.Name'i için
+                new Claim(ClaimTypes.Role, user.Role) // Kullanıcının rolü
+                // İsteğe bağlı olarak başka claim'ler eklenebilir
+            };
+
+            var tokenDescriptor = new SecurityTokenDescriptor
+            {
+                Subject = new ClaimsIdentity(claims),
+                Expires = DateTime.UtcNow.AddMinutes(tokenValidityInMinutes),
+                Issuer = jwtIssuer,
+                Audience = jwtAudience,
+                SigningCredentials = credentials
+            };
+
+            var tokenHandler = new JwtSecurityTokenHandler();
+            var token = tokenHandler.CreateToken(tokenDescriptor);
+
+            return tokenHandler.WriteToken(token);
+        }
+    }
+}// StockMarket.Api/Controllers/StocksController.cs
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using StockMarket.Api.Models; // TickerSymbolDto ve diğer modeller için
+using StockMarket.Api.Services;
+using System;
+using System.Collections.Generic; // List<string> için
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Xml;
+using System.Xml.Linq;
+using System.Xml.Serialization;
+using System.Xml.Xsl;
+using Microsoft.Extensions.Logging;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Hosting;
+
+namespace StockMarket.Api.Controllers
+{
+    [ApiController]
+    [Route("api/v1/stocks")]
+    [Authorize] // Controller seviyesinde yetkilendirme
+    public class StocksController : ControllerBase
+    {
+        private readonly IStockDataService _stockDataService;
+        private readonly ILogger<StocksController> _logger;
+        private readonly IWebHostEnvironment _env;
+
+        public StocksController(
+            IStockDataService stockDataService,
+            ILogger<StocksController> logger,
+            IWebHostEnvironment env)
+        {
+            _stockDataService = stockDataService ?? throw new ArgumentNullException(nameof(stockDataService));
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _env = env ?? throw new ArgumentNullException(nameof(env));
+        }
+
+        // GET: api/v1/stocks
+        [HttpGet]
+        [Produces("application/xml")] // Bu endpoint XML üretecek
+        [ProducesResponseType(typeof(StockDataFeed), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetAllStocks()
+        {
+            try
+            {
+                _logger.LogInformation("Authenticated user {User} called GetAllStocks endpoint.", User.Identity?.Name ?? "Anonymous");
+                var stockDataFeed = await _stockDataService.GetAllStocksAsync();
+
+                if (stockDataFeed == null || !stockDataFeed.Stocks.Any())
+                {
+                    _logger.LogWarning("Hiçbir hisse senedi verisi bulunamadı.");
+                    // API'nin XML üretmesi beklendiği için NotFound durumunda da XML dönebiliriz.
+                    return NotFound($"<Error xmlns=\"http://www.example.com/stockdata/v1\"><Message>Hisse senedi verisi bulunamadı.</Message></Error>");
+                }
+                return Ok(stockDataFeed);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "GetAllStocks endpoint'inde bir hata oluştu.");
+                return StatusCode(StatusCodes.Status500InternalServerError, $"<Error xmlns=\"http://www.example.com/stockdata/v1\"><Message>Internal server error. Please try again later.</Message></Error>");
+            }
+        }
+
+        // GET: api/v1/stocks/{ticker}
+        [HttpGet("{ticker}")]
+        [Produces("application/xml")] // Bu endpoint XML üretecek
+        [ProducesResponseType(typeof(Stock), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetStockByTicker(string ticker)
+        {
+            if (string.IsNullOrWhiteSpace(ticker))
+            {
+                 return BadRequest($"<Error xmlns=\"http://www.example.com/stockdata/v1\"><Message>Ticker sembolü boş olamaz.</Message></Error>");
+            }
+            try
+            {
+                _logger.LogInformation("Authenticated user {User} called GetStockByTicker endpoint for Ticker: {Ticker}", User.Identity?.Name ?? "Anonymous", ticker);
+                var stock = await _stockDataService.GetStockByTickerAsync(ticker);
+
+                if (stock == null)
+                {
+                    _logger.LogWarning("Ticker sembolü '{Ticker}' için hisse senedi bulunamadı.", ticker);
+                    return NotFound($"<Error xmlns=\"http://www.example.com/stockdata/v1\"><Message>'{ticker}' sembolüne sahip hisse senedi bulunamadı.</Message></Error>");
+                }
+                return Ok(stock);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "GetStockByTicker endpoint'inde bir hata oluştu. Ticker: {Ticker}", ticker);
+                return StatusCode(StatusCodes.Status500InternalServerError, $"<Error xmlns=\"http://www.example.com/stockdata/v1\"><Message>Internal server error. Please try again later.</Message></Error>");
+            }
+        }
+
+        // GET: api/v1/stocks/report/html
+        [HttpGet("report/html")]
+        [AllowAnonymous]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetStockReportHtml()
+        {
+            _logger.LogInformation("GetStockReportHtml endpoint çağrıldı.");
+            try
+            {
+                var stockDataFeed = await _stockDataService.GetAllStocksAsync();
+                if (stockDataFeed == null || !stockDataFeed.Stocks.Any())
+                {
+                    _logger.LogWarning("HTML raporu için hisse senedi verisi bulunamadı.");
+                    return Content("<html><body><h1>Error</h1><p>No stock data available to generate the report.</p></body></html>", "text/html", Encoding.UTF8);
+                }
+
+                string xmlInput;
+                var xmlSerializer = new XmlSerializer(typeof(StockDataFeed));
+                var writerSettings = new XmlWriterSettings { Indent = true, Encoding = Encoding.UTF8 };
+                using (var stringWriter = new StringWriter())
+                {
+                    using (var xmlWriter = XmlWriter.Create(stringWriter, writerSettings))
+                    {
+                        xmlSerializer.Serialize(xmlWriter, stockDataFeed);
+                        xmlInput = stringWriter.ToString();
+                    }
+                }
+
+                var xslt = new XslCompiledTransform();
+                var xsltPath = Path.Combine(_env.ContentRootPath, "Transforms", "StocksToHtml.xslt");
+                if (!System.IO.File.Exists(xsltPath))
+                {
+                    _logger.LogError("XSLT dosyası bulunamadı: {Path}", xsltPath);
+                    return StatusCode(StatusCodes.Status500InternalServerError, "Internal server error: Transformation file not found.");
+                }
+                xslt.Load(xsltPath);
+
+                // YENİ: XSLT parametresi ekle
+                var xsltArgs = new XsltArgumentList();
+                var reportTime = DateTime.Now.ToString("dd-MM-yyyy HH:mm:ss");
+                xsltArgs.AddParam("reportGenerationTime", "", reportTime);
+
+                using (var stringReader = new StringReader(xmlInput))
+                using (var xmlReader = XmlReader.Create(stringReader))
+                using (var stringWriterOutput = new StringWriter())
+                {
+                    // YENİ: XSLT argümanlarını kullan
+                    xslt.Transform(xmlReader, xsltArgs, stringWriterOutput);
+                    string htmlOutput = stringWriterOutput.ToString();
+                    return Content(htmlOutput, "text/html", Encoding.UTF8);
+                }
+            }
+            catch (XsltException xsltEx)
+            {
+                _logger.LogError(xsltEx, "XSLT dönüşümü sırasında hata oluştu.");
+                return StatusCode(StatusCodes.Status500InternalServerError, $"XSLT transformation error: {xsltEx.Message}");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "GetStockReportHtml endpoint'inde bir hata oluştu.");
+                return StatusCode(StatusCodes.Status500InternalServerError, "Internal server error. Please try again later.");
+            }
+        }
+
+        // GET: api/v1/stocks/query-with-xdocument
+        [HttpGet("query-with-xdocument")]
+        [Produces("application/xml")]
+        [ProducesResponseType(typeof(string), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> QueryStocksWithXDocument([FromQuery] decimal minPrice = 0)
+        {
+            // ... (bu metodun içeriği bir önceki mesajdaki gibi kalabilir, zaten doğruydu) ...
+             _logger.LogInformation("QueryStocksWithXDocument endpoint called with minPrice: {MinPrice}", minPrice);
+            if (minPrice < 0)
+            {
+                 return BadRequest(Content($"<Error xmlns=\"http://www.example.com/stockdata/v1\"><Message>minPrice cannot be negative.</Message></Error>", "application/xml"));
+            }
+
+            try
+            {
+                var stockDataFeed = await _stockDataService.GetAllStocksAsync();
+                if (stockDataFeed == null || !stockDataFeed.Stocks.Any())
+                {
+                    return Ok(Content($"<NoDataAvailable xmlns=\"http://www.example.com/stockdata/v1\" />", "application/xml"));
+                }
+
+                string originalXmlString;
+                var xmlSerializer = new XmlSerializer(typeof(StockDataFeed));
+                var namespaces = new XmlSerializerNamespaces();
+                namespaces.Add(string.Empty, "http://www.example.com/stockdata/v1");
+
+                using (var stringWriter = new StringWriter())
+                {
+                    using (var xmlWriter = XmlWriter.Create(stringWriter, new XmlWriterSettings { Encoding = Encoding.UTF8, OmitXmlDeclaration = false, Indent = false }))
+                    {
+                        xmlSerializer.Serialize(xmlWriter, stockDataFeed, namespaces);
+                        originalXmlString = stringWriter.ToString();
+                    }
+                }
+
+                XDocument xDoc = XDocument.Parse(originalXmlString);
+                XNamespace stockNs = "http://www.example.com/stockdata/v1";
+
+                var filteredStockElements = xDoc.Descendants(stockNs + "Stock")
+                                         .Where(stockElement =>
+                                         {
+                                             var priceElement = stockElement.Element(stockNs + "CurrentPrice");
+                                             if (priceElement != null && decimal.TryParse(priceElement.Value, out decimal price))
+                                             {
+                                                 return price > minPrice;
+                                             }
+                                             return false;
+                                         })
+                                         .ToList();
+
+                if (!filteredStockElements.Any())
+                {
+                    return Content($"<FilteredStockData xmlns=\"{stockNs}\"><Message>No stocks found with price greater than {minPrice}.</Message></FilteredStockData>", "application/xml", Encoding.UTF8);
+                }
+
+                XElement filteredRoot = new XElement(stockNs + "FilteredStockData");
+                foreach (var stockNode in filteredStockElements)
+                {
+                    filteredRoot.Add(new XElement(stockNode));
+                }
+                
+                return Content(filteredRoot.ToString(SaveOptions.None), "application/xml", Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "QueryStocksWithXDocument endpoint'inde bir hata oluştu.");
+                return StatusCode(StatusCodes.Status500InternalServerError, Content($"<Error xmlns=\"http://www.example.com/stockdata/v1\"><Message>An error occurred while processing your request.</Message></Error>", "application/xml"));
+            }
+        }
+
+        // === YENİ ADMİN ENDPOINT'LERİ ===
+
+        // POST: api/v1/stocks/track
+        [HttpPost("track")]
+        [Authorize(Roles = "Admin")]
+        [Consumes("application/json")] // JSON kabul eder
+        [Produces("application/json")] // JSON döner (mesajlar için)
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status403Forbidden)]
+        public async Task<IActionResult> TrackNewSymbol([FromBody] TickerSymbolDto symbolDto)
+        {
+            if (!ModelState.IsValid) // DTO validasyonunu kontrol et
+            {
+                return BadRequest(ModelState); // ModelState hatalarını JSON olarak döner
+            }
+            // TickerSymbolDto içindeki [Required] zaten null/boş kontrolü yapar.
+            // ModelState.IsValid false ise buraya düşer.
+
+            _logger.LogInformation("Admin user {User} attempting to track symbol: {Symbol}", User.Identity?.Name ?? "Anonymous", symbolDto.TickerSymbol);
+            bool addedNow = await _stockDataService.AddTrackedSymbolAsync(symbolDto.TickerSymbol);
+
+            if (addedNow)
+            {
+                return Ok(new { message = $"Symbol '{symbolDto.TickerSymbol.ToUpperInvariant()}' is now being tracked." });
+            }
+            else
+            {
+                var currentSymbols = await _stockDataService.GetTrackedSymbolsAsync();
+                if (currentSymbols.Contains(symbolDto.TickerSymbol.ToUpperInvariant()))
+                {
+                    return Ok(new { message = $"Symbol '{symbolDto.TickerSymbol.ToUpperInvariant()}' is already being tracked." });
+                }
+                // Eğer AddTrackedSymbolAsync false döndüyse ve listede de yoksa, başka bir sorun olabilir
+                // (örn: sembol formatı vs. serviste daha detaylı kontrol edilebilir)
+                return BadRequest(new { message = $"Could not track symbol '{symbolDto.TickerSymbol.ToUpperInvariant()}', it might be invalid or an unexpected error occurred." });
+            }
+        }
+
+        // DELETE: api/v1/stocks/track/{ticker}
+        [HttpDelete("track/{ticker}")]
+        [Authorize(Roles = "Admin")]
+        [Produces("application/json")] // JSON döner
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status403Forbidden)]
+        public async Task<IActionResult> UntrackSymbol(string ticker)
+        {
+            if (string.IsNullOrWhiteSpace(ticker))
+            {
+                return BadRequest(new { message = "Ticker symbol cannot be empty." });
+            }
+
+            _logger.LogInformation("Admin user {User} attempting to untrack symbol: {Symbol}", User.Identity?.Name ?? "Anonymous", ticker);
+            var success = await _stockDataService.RemoveTrackedSymbolAsync(ticker);
+
+            if (success)
+            {
+                return Ok(new { message = $"Symbol '{ticker.ToUpperInvariant()}' is no longer being tracked." });
+            }
+            return NotFound(new { message = $"Symbol '{ticker.ToUpperInvariant()}' not found in tracking list or could not be removed." });
+        }
+
+        // GET: api/v1/stocks/tracked-symbols (Admin paneli için)
+        [HttpGet("tracked-symbols")]
+        [Authorize(Roles = "Admin")]
+        [Produces("application/json")] // Bu JSON dönecek
+        [ProducesResponseType(typeof(List<string>), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status403Forbidden)]
+        public async Task<IActionResult> GetCurrentlyTrackedSymbols()
+        {
+            _logger.LogInformation("Admin user {User} fetching tracked symbols list.", User.Identity?.Name ?? "Anonymous");
+            var symbols = await _stockDataService.GetTrackedSymbolsAsync();
+            return Ok(symbols);
+        }
+    }
+}// StockMarket.Api/Controllers/UserPreferencesController.cs
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.JsonPatch; // PATCH için bu using gerekli olacak
+using Microsoft.AspNetCore.Mvc;
+using StockMarket.Api.Models;
+using StockMarket.Api.Services;
+using System;
+using System.Linq;
+using System.Security.Claims; // UserId'yi Claim'lerden almak için
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using System.IdentityModel.Tokens.Jwt; // <-- BU SATIRI EKLE
+namespace StockMarket.Api.Controllers
+{
+    [ApiController]
+    [Route("api/v1/user/preferences")] // Kullanıcıya özel olduğu için /user/preferences gibi bir path
+    [Authorize] // Bu controller'daki tüm endpoint'ler kimlik doğrulaması gerektirir
+    [Produces("application/json")] // Bu controller genellikle JSON dönecek
+    public class UserPreferencesController : ControllerBase
+    {
+        private readonly IUserPreferenceService _preferenceService;
+        private readonly ILogger<UserPreferencesController> _logger;
+
+        public UserPreferencesController(IUserPreferenceService preferenceService, ILogger<UserPreferencesController> logger)
+        {
+            _preferenceService = preferenceService;
+            _logger = logger;
+        }
+
+        private string? GetCurrentUserId()
+        {
+            // JWT'den kullanıcı ID'sini al (Subject veya NameIdentifier claim'i)
+            return User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue(JwtRegisteredClaimNames.Sub);
+        }
+
+        // GET: api/v1/user/preferences
+        /// <summary>
+        /// Gets all preferences for the authenticated user.
+        /// </summary>
+        [HttpGet]
+        [ProducesResponseType(typeof(IEnumerable<StockUserPreferenceResponseDto>), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        public async Task<IActionResult> GetAllUserPreferences()
+        {
+            var userId = GetCurrentUserId();
+            if (string.IsNullOrEmpty(userId))
+            {
+                return Unauthorized(new { message = "User ID could not be determined from token." });
+            }
+
+            _logger.LogInformation("User {UserId} fetching all their preferences.", userId);
+            var preferences = await _preferenceService.GetAllPreferencesForUserAsync(userId);
+            return Ok(preferences);
+        }
+
+
+        // GET: api/v1/user/preferences/{tickerSymbol}
+        /// <summary>
+        /// Gets the preference for a specific stock for the authenticated user.
+        /// </summary>
+        /// <param name="tickerSymbol">The stock ticker symbol.</param>
+        [HttpGet("{tickerSymbol}")]
+        [ProducesResponseType(typeof(StockUserPreferenceResponseDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetPreferenceForTicker(string tickerSymbol)
+        {
+            var userId = GetCurrentUserId();
+            if (string.IsNullOrEmpty(userId))
+            {
+                return Unauthorized(new { message = "User ID could not be determined from token." });
+            }
+            if (string.IsNullOrWhiteSpace(tickerSymbol))
+            {
+                return BadRequest(new { message = "Ticker symbol cannot be empty." });
+            }
+
+            _logger.LogInformation("User {UserId} fetching preference for ticker: {TickerSymbol}", userId, tickerSymbol);
+            var preference = await _preferenceService.GetPreferenceAsync(userId, tickerSymbol);
+
+            if (preference == null)
+            {
+                return NotFound(new { message = $"No preference found for ticker '{tickerSymbol}' for the current user." });
+            }
+            return Ok(preference);
+        }
+
+        // PUT: api/v1/user/preferences/{tickerSymbol}
+        /// <summary>
+        /// Creates or updates the preference for a specific stock for the authenticated user.
+        /// </summary>
+        /// <param name="tickerSymbol">The stock ticker symbol.</param>
+        /// <param name="preferenceDto">The preference data.</param>
+        [HttpPut("{tickerSymbol}")]
+        [Consumes("application/json")]
+        [ProducesResponseType(typeof(StockUserPreferenceResponseDto), StatusCodes.Status200OK)] // Güncelleme başarılı
+        [ProducesResponseType(typeof(StockUserPreferenceResponseDto), StatusCodes.Status201Created)] // Oluşturma başarılı
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        public async Task<IActionResult> CreateOrUpdatePreference(string tickerSymbol, [FromBody] StockUserPreferenceCreateUpdateDto preferenceDto)
+        {
+            var userId = GetCurrentUserId();
+            if (string.IsNullOrEmpty(userId))
+            {
+                return Unauthorized(new { message = "User ID could not be determined from token." });
+            }
+            if (string.IsNullOrWhiteSpace(tickerSymbol))
+            {
+                return BadRequest(new { message = "Ticker symbol cannot be empty." });
+            }
+            if (!ModelState.IsValid) // DTO validasyonu
+            {
+                return BadRequest(ModelState);
+            }
+
+            _logger.LogInformation("User {UserId} creating/updating preference for ticker: {TickerSymbol}", userId, tickerSymbol);
+            // Servis metodu hem oluşturma hem de güncelleme yapacak.
+            // Var olup olmadığını kontrol edip ona göre 200 OK veya 201 Created dönebiliriz.
+            var existingPreference = await _preferenceService.GetPreferenceAsync(userId, tickerSymbol);
+            var result = await _preferenceService.CreateOrUpdatePreferenceAsync(userId, tickerSymbol, preferenceDto);
+
+            if (result == null) // Bu normalde olmamalı, servis bir DTO dönmeli
+            {
+                 _logger.LogError("CreateOrUpdatePreferenceAsync returned null for User: {UserId}, Ticker: {TickerSymbol}", userId, tickerSymbol);
+                return StatusCode(StatusCodes.Status500InternalServerError, new { message = "An error occurred while saving preference." });
+            }
+
+            if (existingPreference != null) // Güncellendi
+            {
+                return Ok(result);
+            }
+            else // Yeni oluşturuldu
+            {
+                // Oluşturulan kaynağın URI'sini döndürmek iyi bir pratiktir.
+                return CreatedAtAction(nameof(GetPreferenceForTicker), new { tickerSymbol = result.TickerSymbol }, result);
+            }
+        }
+
+        // DELETE: api/v1/user/preferences/{tickerSymbol}
+        /// <summary>
+        /// Deletes the preference for a specific stock for the authenticated user.
+        /// </summary>
+        /// <param name="tickerSymbol">The stock ticker symbol.</param>
+        [HttpDelete("{tickerSymbol}")]
+        [ProducesResponseType(StatusCodes.Status204NoContent)] // Başarılı silme
+        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> DeletePreference(string tickerSymbol)
+        {
+            var userId = GetCurrentUserId();
+            if (string.IsNullOrEmpty(userId))
+            {
+                return Unauthorized(new { message = "User ID could not be determined from token." });
+            }
+            if (string.IsNullOrWhiteSpace(tickerSymbol))
+            {
+                return BadRequest(new { message = "Ticker symbol cannot be empty." });
+            }
+
+            _logger.LogInformation("User {UserId} deleting preference for ticker: {TickerSymbol}", userId, tickerSymbol);
+            var success = await _preferenceService.DeletePreferenceAsync(userId, tickerSymbol);
+
+            if (!success)
+            {
+                return NotFound(new { message = $"No preference found to delete for ticker '{tickerSymbol}' for the current user." });
+            }
+            return NoContent(); // Silme başarılı, içerik yok.
+        }
+
+
+        // // PATCH: api/v1/user/preferences/{tickerSymbol} (İSTEĞE BAĞLI - DAHA İLERİ SEVİYE)
+        // /// <summary>
+        // /// Partially updates the preference for a specific stock for the authenticated user.
+        // /// Requires 'Content-Type: application/json-patch+json'.
+        // /// </summary>
+        // /// <param name="tickerSymbol">The stock ticker symbol.</param>
+        // /// <param name="patchDoc">The JSON Patch document describing the updates.</param>
+        // /*  // PATCH implementasyonu için aşağıdaki using'ler ve paketler gerekir:
+        //     // NuGet: Microsoft.AspNetCore.JsonPatch
+        //     // NuGet: Microsoft.AspNetCore.Mvc.NewtonsoftJson (Eğer Newtonsoft.Json tabanlı JsonPatch kullanılıyorsa)
+        //     // using Microsoft.AspNetCore.JsonPatch;
+
+        // [HttpPatch("{tickerSymbol}")]
+        // [Consumes("application/json-patch+json")] // PATCH için özel içerik tipi
+        // [ProducesResponseType(typeof(StockUserPreferenceResponseDto), StatusCodes.Status200OK)]
+        // [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        // [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+        // [ProducesResponseType(StatusCodes.Status404NotFound)]
+        // public async Task<IActionResult> PatchPreference(string tickerSymbol,
+        //     [FromBody] JsonPatchDocument<StockUserPreferenceCreateUpdateDto>? patchDoc)
+        // {
+        //     var userId = GetCurrentUserId();
+        //     if (string.IsNullOrEmpty(userId))
+        //     {
+        //         return Unauthorized(new { message = "User ID could not be determined from token." });
+        //     }
+        //     if (string.IsNullOrWhiteSpace(tickerSymbol))
+        //     {
+        //         return BadRequest(new { message = "Ticker symbol cannot be empty." });
+        //     }
+        //     if (patchDoc == null)
+        //     {
+        //         return BadRequest(new { message = "A JSON Patch document is required." });
+        //     }
+
+        //     _logger.LogInformation("User {UserId} patching preference for ticker: {TickerSymbol}", userId, tickerSymbol);
+
+        //     var existingPreferenceModel = await _preferenceService.GetRawPreferenceAsync(userId, tickerSymbol); // Serviste bu metot lazım olacak (StockUserPreference dönecek)
+        //     if (existingPreferenceModel == null)
+        //     {
+        //         return NotFound(new { message = $"No preference found to patch for ticker '{tickerSymbol}' for the current user." });
+        //     }
+
+        //     // Mevcut modeli DTO'ya çevir, patch'i uygula, validasyonu yap, sonra DTO'yu modele geri çevir
+        //     var preferenceToPatchDto = new StockUserPreferenceCreateUpdateDto
+        //     {
+        //         Notes = existingPreferenceModel.Notes,
+        //         PriceAlertLower = existingPreferenceModel.PriceAlertLower,
+        //         PriceAlertUpper = existingPreferenceModel.PriceAlertUpper
+        //     };
+
+        //     patchDoc.ApplyTo(preferenceToPatchDto, ModelState); // ModelState'e hataları ekler
+
+        //     // ModelState.IsValid, DataAnnotations ve JsonPatchDocument'un uyguladığı değişikliklerin
+        //     // DTO'daki validasyon kurallarına (örn: Range) uyup uymadığını kontrol eder.
+        //     if (!TryValidateModel(preferenceToPatchDto)) // JsonPatch sonrası DTO'yu tekrar valide et
+        //     {
+        //         return BadRequest(ModelState);
+        //     }
+
+        //     // Servise güncellenmiş DTO'yu gönder
+        //     var updatedPreference = await _preferenceService.CreateOrUpdatePreferenceAsync(userId, tickerSymbol, preferenceToPatchDto);
+
+        //     if (updatedPreference == null)
+        //     {
+        //         return StatusCode(StatusCodes.Status500InternalServerError, new { message = "An error occurred while patching preference." });
+        //     }
+
+        //     return Ok(updatedPreference);
+        // }
+        // */
+        // // PATCH için IUserPreferenceService'e GetRawPreferenceAsync(string userId, string tickerSymbol) gibi bir metot eklemek gerekebilir
+        // // Bu metot, patch uygulanacak ham StockUserPreference nesnesini döndürür.
+        // // Veya PatchPreferenceAsync metodu doğrudan serviste de implemente edilebilir.
+    }
+}// StockMarket.Api/Controllers/ValidationController.cs
+using Microsoft.AspNetCore.Authorization; // [AllowAnonymous] için
+using Microsoft.AspNetCore.Hosting;       // IWebHostEnvironment için
+using Microsoft.AspNetCore.Http;        // StatusCodes için
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;     // ILogger için
+using StockMarket.Api.Models;           // ValidationResultDto ve StockDataFeed için
+using StockMarket.Api.Services;         // IStockDataService için
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;                      // Any() metodu için
+using System.Text;
+using System.Threading.Tasks;
+using System.Xml;
+using System.Xml.Schema;                // XmlSchemaSet, XmlSchemaException için
+using System.Xml.Serialization;         // XmlSerializer için
+
+namespace StockMarket.Api.Controllers
+{
+    [ApiController]
+    [Route("api/v1/validation")]
+    [Produces("application/json")] // Bu controller validasyon sonuçlarını JSON olarak dönecek
+    public class ValidationController : ControllerBase
+    {
+        private readonly IStockDataService _stockDataService;
+        private readonly IWebHostEnvironment _env;
+        private readonly ILogger<ValidationController> _logger;
+
+        public ValidationController(
+            IStockDataService stockDataService,
+            IWebHostEnvironment env,
+            ILogger<ValidationController> logger)
+        {
+            _stockDataService = stockDataService;
+            _env = env;
+            _logger = logger;
+        }
+
+        // GET: api/v1/validation/xsd-check-all-stocks
+        [HttpGet("xsd-check-all-stocks")]
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(ValidationResultDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(ValidationResultDto), StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> ValidateAllStocksAgainstXsd()
+        {
+            _logger.LogInformation("ValidateAllStocksAgainstXsd endpoint çağrıldı.");
+            var validationMessages = new List<string>();
+            bool isValid = true;
+
+            try
+            {
+                var stockDataFeed = await _stockDataService.GetAllStocksAsync();
+                if (stockDataFeed == null || !stockDataFeed.Stocks.Any())
+                {
+                    return Ok(new ValidationResultDto { IsValid = false, Messages = new List<string> { "Valide edilecek hisse senedi verisi bulunamadı." } });
+                }
+
+                string xmlInput;
+                var xmlSerializer = new XmlSerializer(typeof(StockDataFeed));
+                var writerSettings = new XmlWriterSettings { Indent = false, Encoding = Encoding.UTF8 };
+                var namespaces = new XmlSerializerNamespaces();
+                namespaces.Add(string.Empty, "http://www.example.com/stockdata/v1");
+
+                using (var stringWriter = new StringWriter())
+                {
+                    using (var xmlWriter = XmlWriter.Create(stringWriter, writerSettings))
+                    {
+                        xmlSerializer.Serialize(xmlWriter, stockDataFeed, namespaces);
+                        xmlInput = stringWriter.ToString();
+                    }
+                }
+                _logger.LogDebug("XSD ile valide edilecek XML (ilk 500 karakter): {XmlContent}", xmlInput.Substring(0, Math.Min(xmlInput.Length, 500)));
+
+                var schemas = new XmlSchemaSet();
+                var xsdPath = Path.Combine(_env.ContentRootPath, "stockdata.xsd");
+                if (!System.IO.File.Exists(xsdPath))
+                {
+                    _logger.LogError("XSD şema dosyası bulunamadı: {Path}", xsdPath);
+                    return StatusCode(StatusCodes.Status500InternalServerError,
+                        new ValidationResultDto { IsValid = false, Messages = new List<string> { $"XSD şema dosyası bulunamadı: {xsdPath}" } });
+                }
+                schemas.Add("http://www.example.com/stockdata/v1", xsdPath);
+
+                var settings = new XmlReaderSettings { ValidationType = ValidationType.Schema, Schemas = schemas };
+                settings.ValidationEventHandler += (sender, e) =>
+                {
+                    isValid = false;
+                    var message = $"XSD Validation Error ({e.Severity}): Line {e.Exception?.LineNumber}, Pos {e.Exception?.LinePosition} - {e.Message}";
+                    validationMessages.Add(message);
+                    _logger.LogWarning(message);
+                };
+
+                using (var stringReader = new StringReader(xmlInput))
+                using (var xmlReader = XmlReader.Create(stringReader, settings))
+                {
+                    while (xmlReader.Read()) { }
+                }
+
+                if (isValid && !validationMessages.Any(m => m.ToUpper().Contains("ERROR"))) // Emin olmak için Error içeren mesaj var mı kontrolü
+                {
+                    if (!validationMessages.Any()) // Hiç mesaj yoksa geçerli mesajını ekle
+                        validationMessages.Add("XML, XSD şemasına göre geçerlidir.");
+                } else {
+                    isValid = false; // Hata mesajı varsa veya isValid zaten false ise
+                    if (!validationMessages.Any(m => m.ToUpper().Contains("ERROR")))
+                        validationMessages.Add("XML, XSD şemasına göre GEÇERSİZDİR.");
+                }
+                return Ok(new ValidationResultDto { IsValid = isValid, Messages = validationMessages });
+            }
+            catch (XmlSchemaException schemaEx)
+            {
+                _logger.LogError(schemaEx, "XSD Şema yükleme/derleme hatası.");
+                return StatusCode(StatusCodes.Status500InternalServerError,
+                    new ValidationResultDto { IsValid = false, Messages = new List<string> { $"XSD Şema Hatası: {schemaEx.Message}" } });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "ValidateAllStocksAgainstXsd endpoint'inde genel bir hata oluştu.");
+                return StatusCode(StatusCodes.Status500InternalServerError,
+                    new ValidationResultDto { IsValid = false, Messages = new List<string> { $"Genel Hata: {ex.Message}" } });
+            }
+        }
+
+        // === YENİ DTD VALIDASYON ENDPOINT'İ ===
+        // GET: api/v1/validation/dtd-check-all-stocks
+        [HttpGet("dtd-check-all-stocks")]
+        [AllowAnonymous]
+        [ProducesResponseType(typeof(ValidationResultDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(ValidationResultDto), StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> ValidateAllStocksAgainstDtd()
+        {
+            _logger.LogInformation("ValidateAllStocksAgainstDtd endpoint çağrıldı.");
+            var validationMessages = new List<string>();
+            bool isValid = true;
+
+            try
+            {
+                var stockDataFeed = await _stockDataService.GetAllStocksAsync();
+                if (stockDataFeed == null || !stockDataFeed.Stocks.Any())
+                {
+                    return Ok(new ValidationResultDto { IsValid = false, Messages = new List<string> { "Valide edilecek hisse senedi verisi bulunamadı." } });
+                }
+
+                string xmlInput;
+                var xmlSerializer = new XmlSerializer(typeof(StockDataFeed));
+                
+                // DTD'ler genellikle namespace'lerle iyi çalışmaz.
+                // Eğer DTD'niz namespace'siz ise, serialize ederken namespace'leri kaldırmak
+                // veya DTD'nizi namespace'e uygun hale getirmek gerekebilir.
+                // Bu örnekte, XML'i namespace'siz serialize etmeyi deneyelim DTD için.
+                var noNamespaces = new XmlSerializerNamespaces(new[] { XmlQualifiedName.Empty });
+                var writerSettings = new XmlWriterSettings { Indent = false, Encoding = Encoding.UTF8, OmitXmlDeclaration = true };
+
+                using (var stringWriter = new StringWriter())
+                {
+                    using (var xmlWriter = XmlWriter.Create(stringWriter, writerSettings))
+                    {
+                        // Namespace'siz serialize etmeyi deneyelim
+                        xmlSerializer.Serialize(xmlWriter, stockDataFeed, noNamespaces);
+                        xmlInput = stringWriter.ToString();
+                    }
+                }
+                _logger.LogDebug("DTD için (muhtemelen namespace'siz) ham XML (ilk 500 karakter): {XmlContent}", xmlInput.Substring(0, Math.Min(xmlInput.Length, 500)));
+
+                var dtdFileName = "stockdata.dtd";
+                var dtdPath = Path.Combine(_env.ContentRootPath, dtdFileName);
+                if (!System.IO.File.Exists(dtdPath))
+                {
+                    _logger.LogError("DTD dosyası bulunamadı: {Path}", dtdPath);
+                    return StatusCode(StatusCodes.Status500InternalServerError,
+                        new ValidationResultDto { IsValid = false, Messages = new List<string> { $"DTD dosyası bulunamadı: {dtdPath}" } });
+                }
+
+                // XML'in başına DOCTYPE tanımını ekle
+                var doctypeString = $"<!DOCTYPE StockDataFeed SYSTEM \"{dtdFileName}\">\n"; // DTD dosyasının adı
+                var fullXmlWithDoctype = $"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{doctypeString}{xmlInput}";
+                _logger.LogDebug("DTD validasyonu için DOCTYPE eklenmiş XML (ilk 600 karakter): {XmlContent}", fullXmlWithDoctype.Substring(0, Math.Min(fullXmlWithDoctype.Length, 600)));
+
+                var settings = new XmlReaderSettings
+                {
+                    DtdProcessing = DtdProcessing.Parse,
+                    ValidationType = ValidationType.DTD,
+                    XmlResolver = new XmlUrlResolver() // Harici DTD'leri çözmek için
+                };
+                settings.ValidationEventHandler += (sender, e) =>
+                {
+                    isValid = false; // Hata veya uyarı durumunda isValid'i false yap
+                    var message = $"DTD Validation ({e.Severity}): Line {e.Exception?.LineNumber}, Pos {e.Exception?.LinePosition} - {e.Message}";
+                    validationMessages.Add(message);
+                    _logger.LogWarning(message); // LogWarning veya LogError olabilir severity'e göre
+                };
+
+                using (var stringReader = new StringReader(fullXmlWithDoctype))
+                {
+                    using (var xmlReader = XmlReader.Create(stringReader, settings))
+                    {
+                        try
+                        {
+                            while (xmlReader.Read()) { }
+                        }
+                        catch (XmlException xmlEx) // DTD parse veya validasyon hataları XmlException fırlatabilir
+                        {
+                            isValid = false;
+                            var message = $"DTD Processing/Parsing Error: {xmlEx.Message} (Line: {xmlEx.LineNumber}, Pos: {xmlEx.LinePosition})";
+                            validationMessages.Add(message);
+                            _logger.LogError(xmlEx, "DTD Processing/Parsing Error");
+                        }
+                    }
+                }
+
+                if (isValid && !validationMessages.Any(m => m.ToUpper().Contains("ERROR")))
+                {
+                     if (!validationMessages.Any()) // Hiç mesaj yoksa geçerli mesajını ekle
+                        validationMessages.Insert(0, "XML, DTD'ye göre geçerlidir.");
+                }
+                else
+                {
+                    isValid = false; // Hata mesajı varsa veya isValid zaten false ise
+                    if (!validationMessages.Any(m => m.ToUpper().Contains("ERROR")))
+                        validationMessages.Add("XML, DTD'ye göre GEÇERSİZDİR veya uyarılar içeriyor.");
+                }
+
+                return Ok(new ValidationResultDto { IsValid = isValid, Messages = validationMessages });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "ValidateAllStocksAgainstDtd endpoint'inde genel bir hata oluştu.");
+                return StatusCode(StatusCodes.Status500InternalServerError,
+                    new ValidationResultDto { IsValid = false, Messages = new List<string> { $"Genel Hata: {ex.Message}" } });
+            }
+        }
+    }
+
+    // ValidationResultDto (Mevcut DTO'nuz)
+     public class ValidationResultDto
+     {
+       public bool IsValid { get; set; }
+         public List<string> Messages { get; set; } = new List<string>();
+     }
+}// StockMarket.Api/Models/AuthDtos.cs
+using System.ComponentModel.DataAnnotations;
+
+namespace StockMarket.Api.Models
+{
+    public class UserRegisterDto
+    {
+        [Required]
+        [MinLength(3)]
+        public string Username { get; set; } = string.Empty;
+
+        [Required]
+        [MinLength(6)] // Şifre için minimum uzunluk
+        public string Password { get; set; } = string.Empty;
+    }
+
+    public class UserLoginDto
+    {
+        [Required]
+        public string Username { get; set; } = string.Empty;
+
+        [Required]
+        public string Password { get; set; } = string.Empty;
+    }
+
+    public class LoginResponseDto
+    {
+        public string Token { get; set; } = string.Empty;
+        public string Username { get; set; } = string.Empty;
+        public string Role { get; set; } = string.Empty; // Bu satır var mı ve public mi?
+
+    }
+}using System.Xml.Serialization;
+using System.Xml;
+namespace StockMarket.Api.Models
+{
+    public class Stock
+    {
+        [XmlAttribute("TickerSymbol")] // XML'de attribute olarak görünmesi için
+        public string? TickerSymbol { get; set; }
+
+        [XmlElement("CompanyName")] // XML'de element olarak görünmesi için
+        public string? CompanyName { get; set; }
+
+        [XmlElement("CurrentPrice")]
+        public decimal CurrentPrice { get; set; }
+
+        [XmlElement("Change")]
+        public decimal Change { get; set; }
+
+        [XmlElement("PercentChange")]
+        public decimal PercentChange { get; set; }
+
+        [XmlElement("Volume")]
+        public long Volume { get; set; } // Hacim büyük bir sayı olabilir
+
+        [XmlElement("LastUpdated")]
+        public DateTime LastUpdated { get; set; }
+
+        [XmlElement("Description")]
+        public XmlCDataSection? DescriptionCData // CDATA için özel tip
+        {
+            get
+            {
+                return !string.IsNullOrEmpty(Description) ? new XmlDocument().CreateCDataSection(Description) : null;
+            }
+            set
+            {
+                Description = value?.Value;
+            }
+        }
+
+        [XmlIgnore] // Bu property XML'e serialize edilmeyecek, DescriptionCData kullanılacak
+        public string? Description { get; set; }
+    }
+}using System.Collections.Generic;
+using System.Xml.Serialization;
+
+namespace StockMarket.Api.Models
+{
+    [XmlRoot("StockDataFeed", Namespace = "http://www.example.com/stockdata/v1")]
+    public class StockDataFeed
+    {
+        [XmlElement("Stock")] // Koleksiyon elemanlarının adı <Stock> olacak
+        public List<Stock> Stocks { get; set; } = new List<Stock>();
+    }
+}// StockMarket.Api/Models/StockUserPreference.cs
+using System;
+using System.ComponentModel.DataAnnotations; // Gerekirse validasyon için
+
+namespace StockMarket.Api.Models
+{
+    public class StockUserPreference
+    {
+        [Key] // Eğer bir veritabanı kullanacak olsaydık birincil anahtar olurdu
+        public Guid Id { get; set; } = Guid.NewGuid();
+
+        [Required]
+        public string UserId { get; set; } = string.Empty; // Hangi kullanıcıya ait (User.Id'den gelecek)
+
+        [Required]
+        [MaxLength(10)]
+        public string TickerSymbol { get; set; } = string.Empty;
+
+        [MaxLength(500)] // Notlar için maksimum uzunluk
+        public string? Notes { get; set; }
+
+        public decimal? PriceAlertUpper { get; set; } // Null olabilir
+
+        public decimal? PriceAlertLower { get; set; } // Null olabilir
+
+        public DateTime LastModifiedUtc { get; set; } = DateTime.UtcNow;
+    }
+}// StockMarket.Api/Models/StockUserPreferenceDto.cs
+using System.ComponentModel.DataAnnotations;
+
+namespace StockMarket.Api.Models
+{
+    public class StockUserPreferenceCreateUpdateDto // Hem oluşturma hem güncelleme için kullanılabilir
+    {
+        [MaxLength(500, ErrorMessage = "Notes cannot exceed 500 characters.")]
+        public string? Notes { get; set; }
+
+        [Range(0.01, 1000000, ErrorMessage = "Upper price alert must be a positive value.")] // Örnek bir aralık
+        public decimal? PriceAlertUpper { get; set; }
+
+        [Range(0.01, 1000000, ErrorMessage = "Lower price alert must be a positive value.")] // Örnek bir aralık
+        public decimal? PriceAlertLower { get; set; }
+    }
+
+    public class StockUserPreferenceResponseDto // API'den dönerken kullanılacak DTO
+    {
+        public string TickerSymbol { get; set; } = string.Empty;
+        public string? Notes { get; set; }
+        public decimal? PriceAlertUpper { get; set; }
+        public decimal? PriceAlertLower { get; set; }
+        public DateTime LastModifiedUtc { get; set; }
+    }
+}// StockMarket.Api/Models/TickerSymbolDto.cs
+using System.ComponentModel.DataAnnotations; // DataAnnotations (Required, StringLength vb.) için bu namespace gerekli
+
+namespace StockMarket.Api.Models
+{
+    public class TickerSymbolDto
+    {
+        [Required(ErrorMessage = "Ticker symbol is required.")] // Bu alanın zorunlu olduğunu belirtir
+        [RegularExpression("^[a-zA-Z0-9.-]+$", ErrorMessage = "Ticker symbol can only contain letters, numbers, dots (.), and hyphens (-).")] // Sembol formatını kontrol eder
+        [StringLength(10, MinimumLength = 1, ErrorMessage = "Ticker symbol must be between 1 and 10 characters.")] // Uzunluk kısıtlaması
+        public string TickerSymbol { get; set; } = string.Empty; // Başlangıç değeri atamak iyi bir pratiktir
+    }
+}// StockMarket.Api/Models/User.cs
+namespace StockMarket.Api.Models
+{
+    public class User
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        public string Username { get; set; } = string.Empty;
+        public string PasswordHash { get; set; } = string.Empty; // Şifreyi her zaman hash'lenmiş olarak saklayacağız
+        public string Role { get; set; } = "User"; // Örnek rol: User, Admin vb.
+    }
+}// StockMarket.Api/Program.cs
+
+using Microsoft.AspNetCore.Authentication.JwtBearer; // Authentication için
+using Microsoft.IdentityModel.Tokens;                 // Token ayarları için
+using Microsoft.OpenApi.Models;                     // Swagger/OpenAPI için
+using StockMarket.Api.Services;                     // Servislerimiz için
+using System.Text;                                  // Encoding için
+
+var builder = WebApplication.CreateBuilder(args);
+var configuration = builder.Configuration; // IConfiguration'ı almak için
+
+// CORS Politikası Adı
+var MyAllowSpecificOrigins = "_myAllowSpecificOrigins"; // Politikaya bir isim veriyoruz
+
+// Add services to the container.
+
+// CORS servisini ekle
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy(name: MyAllowSpecificOrigins,
+                      policy =>
+                      {
+                          policy.WithOrigins("http://127.0.0.1:5500",  // VS Code Live Server varsayılan portu
+                                             "http://localhost:5500",   // Alternatif Live Server portu
+                                             "null")                    // file:/// origin'i için (Geliştirme Amaçlı!)
+                                .AllowAnyHeader()
+                                .AllowAnyMethod();
+                          // .AllowCredentials(); // Eğer cookie veya credential'lar gönderiyorsan ve WithOrigins'de * yoksa
+                      });
+});
+
+builder.Services.AddHttpClient(); // HttpClient'ı DI için kaydet
+builder.Services.AddSingleton<IStockDataService, ExternalApiStockDataService>();
+builder.Services.AddScoped<IUserRepository, InMemoryUserRepository>(); // UserRepository'yi DI'a ekle
+builder.Services.AddSingleton<IUserPreferenceService, InMemoryUserPreferenceService>(); // <-- YENİ SERVİS KAYDI (Singleton veya Scoped olabilir)
+
+builder.Services.AddControllers()
+    .AddXmlSerializerFormatters() // XML formatında istek ve cevapları desteklemek için
+    .AddNewtonsoftJson();
+// JWT Authentication Yapılandırması
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultScheme = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    options.SaveToken = true;
+    options.RequireHttpsMetadata = false;
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = true,
+        ValidateAudience = true,
+        ValidateLifetime = true,
+        ValidateIssuerSigningKey = true,
+        ValidIssuer = configuration["Jwt:Issuer"],
+        ValidAudience = configuration["Jwt:Audience"],
+        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(configuration["Jwt:Key"]!)),
+        ClockSkew = TimeSpan.Zero
+    };
+});
+
+// Authorization policies
+builder.Services.AddAuthorization(options =>
+{
+    // options.AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
+});
+
+
+// Swagger/OpenAPI servislerini ekle
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Version = "v1",
+        Title = "Stock Market XML API",
+        Description = "An ASP.NET Core Web API for providing stock market data in XML format.",
+        Contact = new OpenApiContact
+        {
+            Name = "Furkan",
+            Email = "furkan@example.com",
+        },
+        License = new OpenApiLicense
+        {
+            Name = "MIT License",
+            Url = new Uri("https://opensource.org/licenses/MIT"),
+        }
+    });
+
+    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        In = ParameterLocation.Header,
+        Description = "Lütfen geçerli bir JWT token girin. Örnek: \"Bearer {token}\"",
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        BearerFormat = "JWT",
+        Scheme = "Bearer"
+    });
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+
+    
+});
+
+var app = builder.Build();
+
+// Configure the HTTP request pipeline.
+if (app.Environment.IsDevelopment())
+{
+    app.UseDeveloperExceptionPage();
+    app.UseSwagger();
+    app.UseSwaggerUI(options =>
+    {
+        options.SwaggerEndpoint("/swagger/v1/swagger.json", "Stock Market API V1");
+        // options.RoutePrefix = string.Empty;
+    });
+}
+
+// app.UseHttpsRedirection();
+
+app.UseRouting();
+
+app.UseCors(MyAllowSpecificOrigins);
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapControllers();
+
+app.Run();// StockMarket.Api/Services/ExternalApiStockDataService.cs
+using StockMarket.Api.Models;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net.Http;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+
+namespace StockMarket.Api.Services
+{
+    public class ExternalApiStockDataService : IStockDataService
+    {
+        private readonly HttpClient _httpClient;
+        private readonly IConfiguration _configuration;
+        private readonly ILogger<ExternalApiStockDataService> _logger;
+        private readonly string _finnhubApiKey;
+        private List<string> _trackedSymbols;
+
+        private class FinnhubQuoteResponse
+        {
+            [System.Text.Json.Serialization.JsonPropertyName("c")]
+            public decimal? CurrentPrice { get; set; }
+
+            [System.Text.Json.Serialization.JsonPropertyName("d")]
+            public decimal? Change { get; set; }
+
+            [System.Text.Json.Serialization.JsonPropertyName("dp")]
+            public decimal? PercentChange { get; set; }
+
+            [System.Text.Json.Serialization.JsonPropertyName("h")]
+            public decimal? HighPrice { get; set; }
+
+            [System.Text.Json.Serialization.JsonPropertyName("l")]
+            public decimal? LowPrice { get; set; }
+
+            [System.Text.Json.Serialization.JsonPropertyName("o")]
+            public decimal? OpenPrice { get; set; }
+
+            [System.Text.Json.Serialization.JsonPropertyName("pc")]
+            public decimal? PreviousClosePrice { get; set; }
+
+            [System.Text.Json.Serialization.JsonPropertyName("t")]
+            public long? Timestamp { get; set; }
+        }
+
+        private class FinnhubProfileResponse
+        {
+            [System.Text.Json.Serialization.JsonPropertyName("name")]
+            public string? Name { get; set; }
+        }
+
+        public ExternalApiStockDataService(HttpClient httpClient, IConfiguration configuration, ILogger<ExternalApiStockDataService> logger)
+        {
+            _httpClient = httpClient;
+            _configuration = configuration;
+            _logger = logger;
+            _finnhubApiKey = _configuration["Finnhub:ApiKey"]
+                ?? throw new InvalidOperationException("Finnhub API Key not configured.");
+
+            var initialSymbols = _configuration.GetSection("Finnhub:InitialTrackedSymbols").Get<List<string>>();
+            _trackedSymbols = initialSymbols ?? new List<string> { "AAPL", "MSFT", "GOOGL", "TSLA" };
+        }
+
+        public async Task<StockDataFeed?> GetAllStocksAsync()
+        {
+            var stockDataFeed = new StockDataFeed();
+            var symbolsToFetch = new List<string>(_trackedSymbols);
+
+            foreach (var symbol in symbolsToFetch)
+            {
+                var stock = await GetStockByTickerAsync(symbol);
+                if (stock != null)
+                {
+                    stockDataFeed.Stocks.Add(stock);
+                }
+                await Task.Delay(1100); // Finnhub rate limit consideration (approx. 1 request/sec)
+            }
+
+            return stockDataFeed.Stocks.Any() ? stockDataFeed : null;
+        }
+
+        public async Task<Stock?> GetStockByTickerAsync(string tickerSymbol)
+        {
+            if (string.IsNullOrWhiteSpace(tickerSymbol)) return null;
+            if (string.IsNullOrEmpty(_finnhubApiKey) || _finnhubApiKey == "YOUR_FINNHUB_API_KEY_HERE")
+            {
+                _logger.LogWarning("Finnhub API key is not configured. Cannot fetch data for {Symbol}.", tickerSymbol);
+                return null;
+            }
+
+            var quoteRequestUri = $"https://finnhub.io/api/v1/quote?symbol={tickerSymbol}&token={_finnhubApiKey}";
+            var profileRequestUri = $"https://finnhub.io/api/v1/stock/profile2?symbol={tickerSymbol}&token={_finnhubApiKey}";
+
+            try
+            {
+                var quoteResponse = await _httpClient.GetAsync(quoteRequestUri);
+                quoteResponse.EnsureSuccessStatusCode();
+                var quoteJsonResponse = await quoteResponse.Content.ReadAsStringAsync();
+
+                if (string.IsNullOrWhiteSpace(quoteJsonResponse) || quoteJsonResponse == "{}") return null;
+
+                var finnhubQuoteData = JsonSerializer.Deserialize<FinnhubQuoteResponse>(quoteJsonResponse);
+                if (finnhubQuoteData == null || finnhubQuoteData.CurrentPrice == null)
+                {
+                    _logger.LogWarning("Finnhub API did not return valid data for {Symbol}.", tickerSymbol);
+                    return null;
+                }
+
+                string companyName = $"Şirket Adı ({tickerSymbol})";
+                long volume = 0;
+                string description = $"{tickerSymbol} için Finnhub'dan alınan borsa verisi.";
+
+                try
+                {
+                    var profileHttpResponse = await _httpClient.GetAsync(profileRequestUri);
+                    if (profileHttpResponse.IsSuccessStatusCode)
+                    {
+                        var profileJsonResponse = await profileHttpResponse.Content.ReadAsStringAsync();
+                        var profileData = JsonSerializer.Deserialize<FinnhubProfileResponse>(profileJsonResponse);
+                        if (profileData != null && !string.IsNullOrEmpty(profileData.Name))
+                        {
+                            companyName = profileData.Name;
+                        }
+                    }
+                }
+                catch (Exception exProf)
+                {
+                    _logger.LogError(exProf, "Error while fetching profile data from Finnhub for {Symbol}.", tickerSymbol);
+                }
+
+                var stock = new Stock
+                {
+                    TickerSymbol = tickerSymbol.ToUpper(),
+                    CompanyName = companyName,
+                    CurrentPrice = finnhubQuoteData.CurrentPrice ?? 0,
+                    Change = finnhubQuoteData.Change ?? 0,
+                    PercentChange = (finnhubQuoteData.PercentChange ?? 0) / 100,
+                    Volume = volume,
+                    LastUpdated = finnhubQuoteData.Timestamp.HasValue ? DateTimeOffset.FromUnixTimeSeconds(finnhubQuoteData.Timestamp.Value).UtcDateTime : DateTime.UtcNow,
+                    Description = description
+                };
+
+                return stock;
+            }
+            catch (HttpRequestException e)
+            {
+                _logger.LogError(e, "HttpRequestException while fetching data for {Symbol} from Finnhub.", tickerSymbol);
+                return null;
+            }
+            catch (JsonException e)
+            {
+                _logger.LogError(e, "JsonException while parsing Finnhub response for {Symbol}.", tickerSymbol);
+                return null;
+            }
+            catch (Exception e)
+            {
+                _logger.LogError(e, "Unexpected exception while fetching data for {Symbol}.", tickerSymbol);
+                return null;
+            }
+        }
+
+        public Task<bool> AddTrackedSymbolAsync(string tickerSymbol)
+        {
+            var symbolUpper = tickerSymbol.ToUpperInvariant();
+            if (!_trackedSymbols.Contains(symbolUpper))
+            {
+                _trackedSymbols.Add(symbolUpper);
+                return Task.FromResult(true);
+            }
+            return Task.FromResult(false);
+        }
+
+        public Task<bool> RemoveTrackedSymbolAsync(string tickerSymbol)
+        {
+            var symbolUpper = tickerSymbol.ToUpperInvariant();
+            return Task.FromResult(_trackedSymbols.Remove(symbolUpper));
+        }
+
+        public Task<List<string>> GetTrackedSymbolsAsync()
+        {
+            return Task.FromResult(new List<string>(_trackedSymbols));
+        }
+    }
+}
+// StockMarket.Api/Services/InMemoryUserPreferenceService.cs
+using StockMarket.Api.Models;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using StockMarket.Api.Services;
+// using Microsoft.AspNetCore.JsonPatch; // PATCH implementasyonu için eklenecek
+// using Microsoft.AspNetCore.Mvc.ModelBinding.Validation; // PATCH implementasyonu için eklenecek
+
+namespace StockMarket.Api.Services
+{
+    public class InMemoryUserPreferenceService : IUserPreferenceService
+    {
+        // Bellekte tutulacak tercihler listesi.
+        // Bu listeyi static yapmak, servisin Scoped veya Transient olması durumunda bile
+        // verilerin uygulama boyunca korunmasını sağlar. Eğer servis Singleton ise static olmasına gerek yok.
+        // Şimdilik basitlik için static yapalım.
+        private static readonly List<StockUserPreference> _preferences = new List<StockUserPreference>();
+        private readonly ILogger<InMemoryUserPreferenceService> _logger;
+        // private readonly IObjectValidator _objectValidator; // PATCH için validasyon
+
+        public InMemoryUserPreferenceService(ILogger<InMemoryUserPreferenceService> logger) // IObjectValidator objectValidator) // PATCH için
+        {
+            _logger = logger;
+            // _objectValidator = objectValidator; // PATCH için
+        }
+
+        private StockUserPreferenceResponseDto MapToResponseDto(StockUserPreference pref)
+        {
+            return new StockUserPreferenceResponseDto
+            {
+                TickerSymbol = pref.TickerSymbol,
+                Notes = pref.Notes,
+                PriceAlertUpper = pref.PriceAlertUpper,
+                PriceAlertLower = pref.PriceAlertLower,
+                LastModifiedUtc = pref.LastModifiedUtc
+            };
+        }
+
+        public Task<StockUserPreferenceResponseDto?> GetPreferenceAsync(string userId, string tickerSymbol)
+        {
+            var preference = _preferences.FirstOrDefault(p =>
+                p.UserId.Equals(userId, StringComparison.OrdinalIgnoreCase) &&
+                p.TickerSymbol.Equals(tickerSymbol, StringComparison.OrdinalIgnoreCase));
+
+            if (preference == null)
+            {
+                _logger.LogInformation("No preference found for User: {UserId}, Ticker: {TickerSymbol}", userId, tickerSymbol);
+                return Task.FromResult<StockUserPreferenceResponseDto?>(null);
+            }
+
+            _logger.LogInformation("Preference found for User: {UserId}, Ticker: {TickerSymbol}", userId, tickerSymbol);
+            return Task.FromResult<StockUserPreferenceResponseDto?>(MapToResponseDto(preference));
+        }
+
+        public Task<IEnumerable<StockUserPreferenceResponseDto>> GetAllPreferencesForUserAsync(string userId)
+        {
+            var userPreferences = _preferences
+                .Where(p => p.UserId.Equals(userId, StringComparison.OrdinalIgnoreCase))
+                .Select(p => MapToResponseDto(p))
+                .ToList();
+
+            _logger.LogInformation("Found {Count} preferences for User: {UserId}", userPreferences.Count, userId);
+            return Task.FromResult<IEnumerable<StockUserPreferenceResponseDto>>(userPreferences);
+        }
+
+        public Task<StockUserPreferenceResponseDto?> CreateOrUpdatePreferenceAsync(string userId, string tickerSymbol, StockUserPreferenceCreateUpdateDto dto) // PUT için
+        {
+            var symbolUpper = tickerSymbol.ToUpperInvariant();
+            var existingPreference = _preferences.FirstOrDefault(p =>
+                p.UserId.Equals(userId, StringComparison.OrdinalIgnoreCase) &&
+                p.TickerSymbol.Equals(symbolUpper, StringComparison.OrdinalIgnoreCase));
+
+            if (existingPreference != null)
+            {
+                // Güncelleme (PUT: tüm alanlar DTO'dan alınır)
+                existingPreference.Notes = dto.Notes;
+                existingPreference.PriceAlertUpper = dto.PriceAlertUpper;
+                existingPreference.PriceAlertLower = dto.PriceAlertLower;
+                existingPreference.LastModifiedUtc = DateTime.UtcNow;
+                _logger.LogInformation("Updated preference for User: {UserId}, Ticker: {TickerSymbol}", userId, symbolUpper);
+                return Task.FromResult<StockUserPreferenceResponseDto?>(MapToResponseDto(existingPreference));
+            }
+            else
+            {
+                // Oluşturma
+                var newPreference = new StockUserPreference
+                {
+                    UserId = userId,
+                    TickerSymbol = symbolUpper,
+                    Notes = dto.Notes,
+                    PriceAlertUpper = dto.PriceAlertUpper,
+                    PriceAlertLower = dto.PriceAlertLower,
+                    LastModifiedUtc = DateTime.UtcNow
+                };
+                _preferences.Add(newPreference);
+                _logger.LogInformation("Created new preference for User: {UserId}, Ticker: {TickerSymbol}", userId, symbolUpper);
+                return Task.FromResult<StockUserPreferenceResponseDto?>(MapToResponseDto(newPreference));
+            }
+        }
+
+        public Task<bool> DeletePreferenceAsync(string userId, string tickerSymbol)
+        {
+            var symbolUpper = tickerSymbol.ToUpperInvariant();
+            var preferenceToRemove = _preferences.FirstOrDefault(p =>
+                p.UserId.Equals(userId, StringComparison.OrdinalIgnoreCase) &&
+                p.TickerSymbol.Equals(symbolUpper, StringComparison.OrdinalIgnoreCase));
+
+            if (preferenceToRemove != null)
+            {
+                _preferences.Remove(preferenceToRemove);
+                _logger.LogInformation("Deleted preference for User: {UserId}, Ticker: {TickerSymbol}", userId, symbolUpper);
+                return Task.FromResult(true);
+            }
+
+            _logger.LogWarning("Attempted to delete non-existing preference for User: {UserId}, Ticker: {TickerSymbol}", userId, symbolUpper);
+            return Task.FromResult(false);
+        }
+
+        // PATCH İÇİN IMPLEMENTASYON (DAHA SONRA EKLENECEK)
+        /*
+        public Task<StockUserPreferenceResponseDto?> PatchPreferenceAsync(
+            string userId,
+            string tickerSymbol,
+            JsonPatchDocument<StockUserPreferenceCreateUpdateDto> patchDoc)
+        {
+            if (patchDoc == null)
+            {
+                _logger.LogWarning("PatchPreferenceAsync called with null patchDoc for User: {UserId}, Ticker: {TickerSymbol}", userId, tickerSymbol);
+                return Task.FromResult<StockUserPreferenceResponseDto?>(null); // Veya BadRequest durumu controller'da ele alınır
+            }
+
+            var symbolUpper = tickerSymbol.ToUpperInvariant();
+            var existingPreference = _preferences.FirstOrDefault(p =>
+                p.UserId.Equals(userId, StringComparison.OrdinalIgnoreCase) &&
+                p.TickerSymbol.Equals(symbolUpper, StringComparison.OrdinalIgnoreCase));
+
+            if (existingPreference == null)
+            {
+                _logger.LogWarning("PatchPreferenceAsync: No preference found to patch for User: {UserId}, Ticker: {TickerSymbol}", userId, symbolUpper);
+                return Task.FromResult<StockUserPreferenceResponseDto?>(null); // Controller NotFound dönebilir
+            }
+
+            // Mevcut veriyi DTO'ya map et, patch'i uygula, sonra DTO'yu tekrar modele map et
+            var preferenceToPatchDto = new StockUserPreferenceCreateUpdateDto
+            {
+                Notes = existingPreference.Notes,
+                PriceAlertUpper = existingPreference.PriceAlertUpper,
+                PriceAlertLower = existingPreference.PriceAlertLower
+            };
+
+            // JsonPatchDocument'u uygula.
+            // Bu işlem ModelState hataları üretebilir, bunları yakalamak ve controller'a bildirmek gerekir.
+            // patchDoc.ApplyTo(preferenceToPatchDto, _objectValidator); // ModelState'i kontrol etmek için _objectValidator gerekir
+            patchDoc.ApplyTo(preferenceToPatchDto); // Basit uygulama, validasyon controller'da yapılmalı
+
+            // Validasyon (eğer DTO'da DataAnnotations varsa ve _objectValidator kullanılıyorsa)
+            // if (!_objectValidator.IsValid(preferenceToPatchDto))
+            // {
+            //     // Hataları logla veya controller'a ilet
+            //     _logger.LogWarning("Patch resulted in invalid DTO for User: {UserId}, Ticker: {TickerSymbol}", userId, symbolUpper);
+            //     return Task.FromResult<StockUserPreferenceResponseDto?>(null); // Controller BadRequest dönebilir
+            // }
+
+
+            // DTO'dan gelen güncellenmiş değerleri ana modele aktar
+            existingPreference.Notes = preferenceToPatchDto.Notes;
+            existingPreference.PriceAlertUpper = preferenceToPatchDto.PriceAlertUpper;
+            existingPreference.PriceAlertLower = preferenceToPatchDto.PriceAlertLower;
+            existingPreference.LastModifiedUtc = DateTime.UtcNow;
+
+            _logger.LogInformation("Patched preference for User: {UserId}, Ticker: {TickerSymbol}", userId, symbolUpper);
+            return Task.FromResult<StockUserPreferenceResponseDto?>(MapToResponseDto(existingPreference));
+        }
+        */
+    }
+}// StockMarket.Api/Services/InMemoryUserRepository.cs
+using StockMarket.Api.Models;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Threading.Tasks;
+using BCrypt.Net;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Logging;
+
+
+namespace StockMarket.Api.Services
+{
+    public class InMemoryUserRepository : IUserRepository
+    {
+        // _users listesini instance bazlı yapıp, servisi Singleton olarak kaydetmek daha yaygın bir pratiktir
+        // Ancak static liste ve static _fileLock ile de basit senaryolarda çalışır.
+        // Eğer servis Scoped veya Transient ise _users kesinlikle static olmalı ya da
+        // her istekte dosyadan okuma/yazma yapılmalı ki bu verimsiz olur.
+        // Program.cs'de Singleton olarak kaydettiğimiz için static olmasa da olurdu.
+        // Basitlik ve tutarlılık için static bırakabiliriz veya instance bazlı yapıp constructor'da initialize edebiliriz.
+        // Şimdilik static bırakalım.
+        private static List<User> _users = new List<User>();
+        private readonly string _filePath;
+        private readonly ILogger<InMemoryUserRepository> _logger;
+        private static readonly object _fileLock = new object(); // Dosya işlemleri için basit bir kilit
+
+        public InMemoryUserRepository(IWebHostEnvironment env, ILogger<InMemoryUserRepository> logger)
+        {
+            _filePath = Path.Combine(env.ContentRootPath, "users.json");
+            _logger = logger;
+            // Uygulama başladığında sadece bir kez kullanıcıları yükle
+            // Eğer _users listesi zaten doluysa (örneğin, testlerde veya farklı bir senaryoda birden fazla instance oluşursa)
+            // tekrar yüklememek için bir kontrol eklenebilir, ama Singleton servis için bu gerekmeyebilir.
+            // Şimdilik her instance oluşturulduğunda (Singleton olduğu için bir kez) yüklüyoruz.
+            LoadUsersFromFile();
+        }
+
+        private void LoadUsersFromFile()
+        {
+            lock (_fileLock)
+            {
+                bool saveNeededAfterLoad = false;
+                try
+                {
+                    if (File.Exists(_filePath))
+                    {
+                        var jsonData = File.ReadAllText(_filePath);
+                        if (!string.IsNullOrWhiteSpace(jsonData))
+                        {
+                            _users = JsonSerializer.Deserialize<List<User>>(jsonData) ?? new List<User>();
+                            _logger.LogInformation("{Count} kullanıcı users.json dosyasından yüklendi.", _users.Count);
+                        }
+                        else
+                        {
+                            _users = new List<User>(); // Dosya boşsa yeni liste
+                            _logger.LogInformation("users.json dosyası boş, yeni bir kullanıcı listesi oluşturuldu.");
+                            saveNeededAfterLoad = true; // Boş dosyaya varsayılanlar yazılacak
+                        }
+                    }
+                    else
+                    {
+                        _users = new List<User>(); // Dosya yoksa yeni liste
+                        _logger.LogInformation("users.json dosyası bulunamadı, yeni bir kullanıcı listesi oluşturuldu.");
+                        saveNeededAfterLoad = true; // Yok olan dosyaya varsayılanlar yazılacak
+                    }
+
+                    // Varsayılan admin ve test kullanıcısını kontrol et ve yoksa ekle
+                    // EnsureDefaultUser metodu zaten _users listesini güncelliyor.
+                    bool defaultAdminAdded = EnsureDefaultUser("admin", "adminpass", "Admin");
+                    bool defaultTestUserAdded = EnsureDefaultUser("testuser", "testpass", "User");
+
+                    // Eğer varsayılan kullanıcılar yeni eklendiyse veya dosya boş/yok idiyse kaydet
+                    if (saveNeededAfterLoad || defaultAdminAdded || defaultTestUserAdded)
+                    {
+                        SaveChangesToFile();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "users.json dosyasından kullanıcılar yüklenirken hata oluştu. Varsayılan kullanıcılar oluşturuluyor.");
+                    _users.Clear(); // Hata durumunda listeyi temizle, sadece varsayılanları ekle
+                    EnsureDefaultUser("admin", "adminpass", "Admin");
+                    EnsureDefaultUser("testuser", "testpass", "User");
+                    SaveChangesToFile(); // Hata durumunda varsayılanları kaydet
+                }
+            }
+        }
+
+        // Bu metot artık bool dönecek, ekleme yapılıp yapılmadığını belirtmek için
+        private bool EnsureDefaultUser(string username, string password, string role)
+        {
+            if (!_users.Any(u => u.Username.Equals(username, StringComparison.OrdinalIgnoreCase)))
+            {
+                _users.Add(new User // User constructor'ı zaten Id atıyor
+                {
+                    Username = username,
+                   PasswordHash = global::BCrypt.Net.BCrypt.HashPassword(password),
+                    Role = role
+                });
+                _logger.LogInformation("Varsayılan kullanıcı '{Username}' (Rol: {Role}) oluşturuldu ve listeye eklendi.", username, role);
+                return true; // Ekleme yapıldı
+            }
+            return false; // Zaten vardı, ekleme yapılmadı
+        }
+
+        private void SaveChangesToFile()
+        {
+            lock (_fileLock)
+            {
+                try
+                {
+                    var options = new JsonSerializerOptions { WriteIndented = true };
+                    var jsonData = JsonSerializer.Serialize(_users, options);
+                    File.WriteAllText(_filePath, jsonData);
+                    _logger.LogInformation("Kullanıcı değişiklikleri ({Count} kullanıcı) users.json dosyasına kaydedildi.", _users.Count);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Kullanıcı değişiklikleri users.json dosyasına kaydedilirken hata oluştu.");
+                }
+            }
+        }
+
+        public Task AddUserAsync(User user)
+        {
+            // User sınıfının constructor'ı zaten Id atıyor.
+            if (_users.Any(u => u.Username.Equals(user.Username, StringComparison.OrdinalIgnoreCase)))
+            {
+                _logger.LogWarning("'{Username}' kullanıcı adı zaten mevcut, eklenemedi.", user.Username);
+                // Controller'a bu durumu bildirmek için bir exception fırlatılabilir veya bool dönülebilir.
+                // Şimdilik sadece logluyoruz ve işlem yapmıyoruz.
+                // AuthController zaten bu durumu ayrıca kontrol ediyor.
+                return Task.CompletedTask;
+            }
+
+            _users.Add(user);
+            SaveChangesToFile();
+            _logger.LogInformation("Kullanıcı '{Username}' başarıyla eklendi ve dosyaya kaydedildi.", user.Username);
+            return Task.CompletedTask;
+        }
+
+        public Task<User?> GetUserByUsernameAsync(string username)
+        {
+            var user = _users.FirstOrDefault(u => u.Username.Equals(username, StringComparison.OrdinalIgnoreCase));
+            if (user == null)
+            {
+                _logger.LogDebug("Kullanıcı '{Username}' bulunamadı.", username);
+            }
+            return Task.FromResult(user);
+        }
+    }
+}// StockMarket.Api/Services/IStockDataService.cs
+using StockMarket.Api.Models; // StockDataFeed ve Stock modellerimiz için
+using System.Threading.Tasks; // Asenkron metotlar için
+
+namespace StockMarket.Api.Services
+{
+    public interface IStockDataService
+    {
+        Task<StockDataFeed?> GetAllStocksAsync();
+        Task<Stock?> GetStockByTickerAsync(string tickerSymbol);
+        // İleride yeni hisse ekleme, güncelleme gibi metotlar da buraya eklenebilir
+          // === YENİ METOTLAR ===
+        Task<bool> AddTrackedSymbolAsync(string tickerSymbol);
+        Task<bool> RemoveTrackedSymbolAsync(string tickerSymbol);
+        Task<List<string>> GetTrackedSymbolsAsync(); // Takip edilen sembolleri listelemek için (opsiyonel)
+    }
+}// StockMarket.Api/Services/IUserPreferenceService.cs
+using StockMarket.Api.Models;
+using System.Threading.Tasks;
+using System.Collections.Generic; // List için
+// Microsoft.AspNetCore.JsonPatch.JsonPatchDocument; // PATCH için bu using eklenecek
+
+namespace StockMarket.Api.Services
+{
+    public interface IUserPreferenceService
+    {
+        Task<StockUserPreferenceResponseDto?> GetPreferenceAsync(string userId, string tickerSymbol);
+        Task<IEnumerable<StockUserPreferenceResponseDto>> GetAllPreferencesForUserAsync(string userId);
+        Task<StockUserPreferenceResponseDto?> CreateOrUpdatePreferenceAsync(string userId, string tickerSymbol, StockUserPreferenceCreateUpdateDto dto); // PUT için
+        Task<bool> DeletePreferenceAsync(string userId, string tickerSymbol);
+        // Task<StockUserPreferenceResponseDto?> PatchPreferenceAsync(string userId, string tickerSymbol, JsonPatchDocument<StockUserPreferenceCreateUpdateDto> patchDoc); // PATCH için
+    }
+}// StockMarket.Api/Services/IUserRepository.cs
+using StockMarket.Api.Models;
+using System.Threading.Tasks;
+
+namespace StockMarket.Api.Services
+{
+    public interface IUserRepository
+    {
+        Task<User?> GetUserByUsernameAsync(string username);
+        Task AddUserAsync(User user);
+        // Task<bool> UserExistsAsync(string username); // İsteğe bağlı
+    }
+}   <!-- StockMarket.Api/stockdata.dtd -->
+<!ELEMENT StockDataFeed (Stock*)>
+<!ATTLIST StockDataFeed
+          xmlns CDATA #IMPLIED>
+
+<!ELEMENT Stock (CompanyName, CurrentPrice, Change, PercentChange, Volume, LastUpdated, Description)>
+<!ATTLIST Stock TickerSymbol CDATA #REQUIRED>
+
+<!ELEMENT CompanyName (#PCDATA)>
+<!ELEMENT CurrentPrice (#PCDATA)>
+<!ELEMENT Change (#PCDATA)>
+<!ELEMENT PercentChange (#PCDATA)>
+<!ELEMENT Volume (#PCDATA)>
+<!ELEMENT LastUpdated (#PCDATA)>
+<!ELEMENT Description (#PCDATA)><!-- StockMarket.Api/stockdata.xsd -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           targetNamespace="http://www.example.com/stockdata/v1"
+           xmlns:tns="http://www.example.com/stockdata/v1"
+           elementFormDefault="qualified">
+
+    <xs:element name="StockDataFeed">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="Stock" type="tns:StockType" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+
+    <xs:complexType name="StockType">
+        <xs:sequence>
+            <xs:element name="CompanyName" type="xs:string"/>
+            <xs:element name="CurrentPrice" type="xs:decimal"/>
+            <xs:element name="Change" type="xs:decimal"/>
+            <xs:element name="PercentChange" type="xs:decimal"/>
+            <xs:element name="Volume" type="xs:long"/>
+            <xs:element name="LastUpdated" type="xs:dateTime"/>
+            <xs:element name="Description" type="xs:string"/>
+        </xs:sequence>
+        <xs:attribute name="TickerSymbol" type="tns:TickerSymbolType" use="required"/>
+    </xs:complexType>
+
+    <xs:simpleType name="TickerSymbolType">
+        <xs:restriction base="xs:string">
+            <xs:pattern value="[A-Z]{1,5}"/> <!-- Örnek: 1-5 arası büyük harf -->
+            <xs:maxLength value="5"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+</xs:schema>document.addEventListener('DOMContentLoaded', () => {
+    const apiUrl = 'http://localhost:5190/api/v1'; // API'nizin çalıştığı portu KONTROL EDİN!
+    let jwtToken = localStorage.getItem('jwtToken');
+    let userRole = localStorage.getItem('userRole');
+
+    // Auth Section Elements
+    const authSection = document.getElementById('auth-section');
+    const registerForm = document.getElementById('register-form');
+    const loginForm = document.getElementById('login-form');
+    const regUsernameInput = document.getElementById('reg-username');
+    const regPasswordInput = document.getElementById('reg-password');
+    const loginUsernameInput = document.getElementById('login-username');
+    const loginPasswordInput = document.getElementById('login-password');
+    const registerMessage = document.getElementById('register-message');
+    const loginMessage = document.getElementById('login-message');
+    const logoutButton = document.getElementById('logout-button');
+    console.log("Sayfa yüklendi, logoutButton elementi:", logoutButton); // LOG: Buton bulundu mu?
+
+    // Stocks Section Elements
+    const stocksSection = document.getElementById('stocks-section');
+    const getAllStocksButton = document.getElementById('get-all-stocks-button');
+    const tickerSymbolInput = document.getElementById('ticker-symbol-input');
+    const getSingleStockButton = document.getElementById('get-single-stock-button');
+    const getHtmlReportButton = document.getElementById('get-html-report-button');
+    const stocksOutput = document.getElementById('stocks-output');
+    const reportOutput = document.getElementById('report-output');
+
+    // Admin Panel Elements
+    const adminPanelSection = document.getElementById('admin-panel-section');
+    const trackSymbolForm = document.getElementById('track-symbol-form');
+    const newTickerSymbolInput = document.getElementById('new-ticker-symbol');
+    const trackMessage = document.getElementById('track-message');
+    const getTrackedSymbolsButton = document.getElementById('get-tracked-symbols-button');
+    const trackedSymbolsList = document.getElementById('tracked-symbols-list');
+    const untrackMessage = document.getElementById('untrack-message');
+
+    // === YENİ: Kullanıcı Tercihleri Elementleri ===
+    const stockPreferenceSection = document.getElementById('stock-preference-section');
+    const prefTickerSymbolDisplay = document.getElementById('pref-ticker-symbol');
+    const preferenceForm = document.getElementById('preference-form');
+    const prefHiddenTickerInput = document.getElementById('pref-hidden-ticker');
+    const prefNotesInput = document.getElementById('pref-notes');
+    const prefAlertUpperInput = document.getElementById('pref-alert-upper');
+    const prefAlertLowerInput = document.getElementById('pref-alert-lower');
+    const deletePreferenceButton = document.getElementById('delete-preference-button');
+    const preferenceMessage = document.getElementById('preference-message');
+// app.js'in en üstüne modal elementlerini ekle (eğer yoksa)
+const chartModal = document.getElementById('chart-modal');
+const chartModalTitle = document.getElementById('chart-modal-title');
+const chartContainer = document.getElementById('tradingview-chart-widget'); // DİKKAT: ID değişti
+const closeModalButton = document.querySelector('.close-button');
+
+// Kapatma butonları için olay dinleyicileri (eğer yoksa)
+if(closeModalButton) {
+    closeModalButton.addEventListener('click', () => {
+        if (chartModal) chartModal.style.display = 'none';
+    });
+}
+window.addEventListener('click', (event) => {
+    if (event.target == chartModal) {
+        if (chartModal) chartModal.style.display = 'none';
+    }
+});
+
+
+    // YENİ showStockChart FONKSİYONU
+    function showStockChart(ticker) {
+        if (!ticker) return;
+
+        // Modal başlığını ayarla
+        chartModalTitle.textContent = `${ticker} Grafiği`;
+        
+        // Önceki widget'ı temizle (varsa)
+        if (chartContainer) {
+            chartContainer.innerHTML = '';
+        } else {
+            console.error("chart-container elementi bulunamadı!");
+            return;
+        }
+
+        // TradingView widget'ını dinamik olarak oluştur
+       const widgetConfig = {
+        "lineWidth": 2,
+        "lineType": 0,
+        "chartType": "area",
+        "fontColor": "rgb(106, 109, 120)",
+        "gridLineColor": "rgba(242, 242, 242, 0.06)",
+        "volumeUpColor": "rgba(34, 171, 148, 0.5)",
+        "volumeDownColor": "rgba(247, 82, 95, 0.5)",
+        "backgroundColor": "#0F0F0F",
+        "widgetFontColor": "#DBDBDB",
+        "upColor": "#22ab94",
+        "downColor": "#f7525f",
+        "borderUpColor": "#22ab94",
+        "borderDownColor": "#f7525f",
+        "wickUpColor": "#22ab94",
+        "wickDownColor": "#f7525f",
+        "colorTheme": "dark",
+        "isTransparent": false,
+        "locale": "tr", // Türkçe için 'tr' olarak değiştirdim
+        "chartOnly": false,
+        "scalePosition": "right",
+        "scaleMode": "Normal",
+        "fontFamily": "-apple-system, BlinkMacSystemFont, Trebuchet MS, Roboto, Ubuntu, sans-serif",
+        "valuesTracking": "1",
+        "changeMode": "price-and-percent",
+        
+        // --- DİNAMİK KISIM ---
+        // 'symbols' dizisi sadece tıklanan hisse senedi ile dolduruluyor.
+        "symbols": [
+            [
+                ticker, // Görünen isim
+                `${ticker}|1D` // TradingView sembol formatı
+            ]
+        ],
+        
+        "dateRanges": [
+            "1d|1",
+            "1m|30",
+            "3m|60",
+            "12m|1D",
+            "60m|1W",
+            "all|1M"
+        ],
+        "fontSize": "10",
+        "headerFontSize": "medium",
+        
+        // --- BOYUTLANDIRMA DEĞİŞİKLİKLERİ ---
+        "autosize": false,
+        "width": 960
+        ,
+        "height": 500,
+        // ------------------------------------
+
+        "noTimeScale": false,
+        "hideDateRanges": false,
+        "hideMarketStatus": false,
+        "hideSymbolLogo": false,
+        "container_id": "tradingview-chart-widget" // Widget'ın yerleşeceği div'in ID'si
+    };
+
+        // Yeni bir script elementi oluştur
+        const script = document.createElement('script');
+        script.type = 'text/javascript';
+        script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-symbol-overview.js';
+        script.async = true;
+        script.innerHTML = JSON.stringify(widgetConfig);
+
+        // Script'i widget container'ına ekle
+        chartContainer.appendChild(script);
+
+        // Modalı göster
+        if (chartModal) chartModal.style.display = 'flex';
+    }
+    // --- Yardımcı Fonksiyonlar ---
+    function displayMessage(element, message, isSuccess) {
+        if (!element) return;
+        element.textContent = message;
+        element.className = isSuccess ? 'message success' : 'message error';
+    }
+
+    function escapeHtml(unsafe) {
+        if (unsafe === null || typeof unsafe === 'undefined' || typeof unsafe !== 'string') return '';
+        return unsafe
+            .replace(/&/g, "&") // Corrected & to &
+            .replace(/</g, "<")  // Corrected < to <
+            .replace(/>/g, ">")  // Corrected > to >
+            .replace(/"/g, "&quot;")    
+            .replace(/'/g, "'"); // Corrected ' to '
+    }
+
+    function updateUIBasedOnAuthState() {
+        jwtToken = localStorage.getItem('jwtToken');
+        userRole = localStorage.getItem('userRole');
+        console.log("[updateUI] Çağrıldı. Token:", jwtToken, "Role:", userRole);
+
+        if (jwtToken) { // Kullanıcı giriş yapmışsa
+            if (authSection) authSection.style.display = 'none';
+            if (stocksSection) stocksSection.style.display = 'block';
+
+            if (logoutButton) {
+                logoutButton.style.display = 'inline-block';
+                console.log("[updateUI] Çıkış Yap butonu gösterilmeye çalışılıyor. Gerçek display stili:", window.getComputedStyle(logoutButton).display);
+            } else {
+                console.warn("[updateUI] Çıkış Yap butonu (logout-button) HTML'de bulunamadı!");
+            }
+
+            if (adminPanelSection) {
+                if (userRole === 'Admin') {
+                    adminPanelSection.style.display = 'block';
+                    console.log("[updateUI] Admin paneli gösteriliyor.");
+                } else {
+                    adminPanelSection.style.display = 'none';
+                    console.log("[updateUI] Admin paneli gizleniyor (rol Admin değil veya rol yok).");
+                }
+            } else if (userRole === 'Admin') { // Admin rolü var ama panel elementi yoksa uyar
+                 console.warn("[updateUI] Admin rolü var ama Admin panel section (admin-panel-section) HTML'de bulunamadı!");
+            }
+             // Hide preference section by default, only show when editing
+            if (stockPreferenceSection) stockPreferenceSection.style.display = 'none';
+
+        } else { // Kullanıcı çıkış yapmışsa
+            if (authSection) authSection.style.display = 'block';
+            if (stocksSection) stocksSection.style.display = 'none';
+
+            if (logoutButton) {
+                logoutButton.style.display = 'none';
+                console.log("[updateUI] Çıkış Yap butonu gizlenmeye çalışılıyor.");
+            } else {
+                console.warn("[updateUI] Çıkış Yap butonu (logout-button) HTML'de bulunamadı (çıkış durumu)!");
+            }
+
+            if (adminPanelSection) {
+                adminPanelSection.style.display = 'none';
+                console.log("[updateUI] Çıkış yapıldı, admin paneli gizleniyor.");
+            }
+            // Hide preference section on logout
+            if (stockPreferenceSection) stockPreferenceSection.style.display = 'none';
+
+
+            if (stocksOutput) stocksOutput.innerHTML = '';
+            if (reportOutput) { reportOutput.innerHTML = ''; reportOutput.style.display = 'none'; }
+            if (trackedSymbolsList) trackedSymbolsList.innerHTML = '';
+        }
+    }
+
+    // --- Olay Dinleyicileri ---
+
+    if (registerForm) {
+        registerForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const username = regUsernameInput.value;
+            const password = regPasswordInput.value;
+            displayMessage(registerMessage, 'Kayıt yapılıyor...', true);
+            try {
+                const response = await fetch(`${apiUrl}/auth/register`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const responseData = await response.json();
+                if (response.ok) {
+                    displayMessage(registerMessage, responseData.message || 'Kayıt başarılı!', true);
+                    regUsernameInput.value = '';
+                    regPasswordInput.value = '';
+                } else {
+                    displayMessage(registerMessage, responseData.message || `Hata: ${response.statusText}`, false);
+                }
+            } catch (error) {
+                console.error('Register error:', error);
+                displayMessage(registerMessage, 'Kayıt sırasında bir ağ hatası oluştu.', false);
+            }
+        });
+    }
+
+    if (loginForm) {
+        loginForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const username = loginUsernameInput.value;
+            const password = loginPasswordInput.value;
+            displayMessage(loginMessage, 'Giriş yapılıyor...', true);
+            try {
+                const response = await fetch(`${apiUrl}/auth/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const responseData = await response.json();
+                console.log("API'den Gelen Login Yanıtı:", responseData); // LOG 7
+
+                if (response.ok && responseData.token) {
+                    jwtToken = responseData.token;
+                    userRole = responseData.role; // API'den gelen rolü al
+                    localStorage.setItem('jwtToken', jwtToken);
+                    localStorage.setItem('userRole', userRole); // Rolü localStorage'a kaydet
+                    console.log("Login sonrası atanan userRole:", userRole); // LOG 8
+
+                    displayMessage(loginMessage, `Giriş başarılı! Hoş geldin ${escapeHtml(responseData.username)}. Rol: ${escapeHtml(userRole)}`, true);
+                    loginUsernameInput.value = '';
+                    loginPasswordInput.value = '';
+                    updateUIBasedOnAuthState();
+                } else {
+                    jwtToken = null; userRole = null;
+                    localStorage.removeItem('jwtToken'); localStorage.removeItem('userRole');
+                    displayMessage(loginMessage, responseData.message || `Hata: ${response.statusText}`, false);
+                    updateUIBasedOnAuthState();
+                }
+            } catch (error) {
+                console.error('Login error:', error);
+                jwtToken = null; userRole = null;
+                localStorage.removeItem('jwtToken'); localStorage.removeItem('userRole');
+                displayMessage(loginMessage, 'Giriş sırasında bir ağ hatası oluştu.', false);
+                updateUIBasedOnAuthState();
+            }
+        });
+    }
+
+   if (logoutButton) {
+    logoutButton.addEventListener('click', () => {
+        jwtToken = null;
+        userRole = null;
+        localStorage.removeItem('jwtToken');
+        localStorage.removeItem('userRole');
+        updateUIBasedOnAuthState();
+        displayMessage(loginMessage, 'Başarıyla çıkış yapıldı.', true);
+        setTimeout(() => { if(loginMessage) displayMessage(loginMessage, '', true); }, 3000);
+        // Hide preferences form and clear its fields on logout
+        if (stockPreferenceSection) stockPreferenceSection.style.display = 'none';
+        if (prefNotesInput) prefNotesInput.value = '';
+        if (prefAlertUpperInput) prefAlertUpperInput.value = '';
+        if (prefAlertLowerInput) prefAlertLowerInput.value = '';
+        if (prefTickerSymbolDisplay) prefTickerSymbolDisplay.textContent = '';
+        if (prefHiddenTickerInput) prefHiddenTickerInput.value = '';
+        if (preferenceMessage) displayMessage(preferenceMessage, '', true);
+    });
+}
+
+    if (getAllStocksButton) {
+        getAllStocksButton.addEventListener('click', async () => {
+            if (!jwtToken) { alert('Lütfen önce giriş yapın.'); return; }
+            if(stocksOutput) stocksOutput.innerHTML = 'Yükleniyor...';
+            if(reportOutput) { reportOutput.style.display = 'none'; reportOutput.innerHTML = '';}
+             // Hide preference section when fetching all stocks
+            if (stockPreferenceSection) stockPreferenceSection.style.display = 'none';
+            try {
+                const response = await fetch(`${apiUrl}/stocks`, {
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${jwtToken}`, 'Accept': 'application/xml' }
+                });
+                if (response.ok) {
+                    const xmlText = await response.text();
+                    parseAndDisplayXmlAsTable(xmlText, stocksOutput);
+                } else if (response.status === 401) {
+                    if(stocksOutput) stocksOutput.innerHTML = '<p class="message error">Yetkisiz erişim. Lütfen tekrar giriş yapın.</p>';
+                    jwtToken = null; userRole = null; localStorage.removeItem('jwtToken'); localStorage.removeItem('userRole'); updateUIBasedOnAuthState();
+                } else {
+                    const errorText = await response.text();
+                    if(stocksOutput) stocksOutput.innerHTML = `<p class="message error">Hata: ${response.status} - ${escapeHtml(errorText) || response.statusText}</p>`;
+                }
+            } catch (error) {
+                console.error('Get All Stocks error:', error);
+                if(stocksOutput) stocksOutput.innerHTML = '<p class="message error">Hisseleri getirirken bir ağ hatası oluştu.</p>';
+            }
+        });
+    }
+
+    if (getSingleStockButton) {
+        getSingleStockButton.addEventListener('click', async () => {
+            if (!jwtToken) { alert('Lütfen önce giriş yapın.'); return; }
+            const ticker = tickerSymbolInput.value.trim().toUpperCase();
+            if (!ticker) { alert('Lütfen bir hisse sembolü girin.'); return; }
+            if(stocksOutput) stocksOutput.innerHTML = 'Yükleniyor...';
+            if(reportOutput) { reportOutput.style.display = 'none'; reportOutput.innerHTML = '';}
+            // Hide preference section when fetching single stock initially
+            if (stockPreferenceSection) stockPreferenceSection.style.display = 'none';
+            try {
+                const response = await fetch(`${apiUrl}/stocks/${ticker}`, {
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${jwtToken}`, 'Accept': 'application/xml' }
+                });
+                if (response.ok) {
+                    const xmlText = await response.text();
+                    parseAndDisplayXmlAsTable(xmlText, stocksOutput, true);
+                } else if (response.status === 401) {
+                    if(stocksOutput) stocksOutput.innerHTML = '<p class="message error">Yetkisiz erişim. Lütfen tekrar giriş yapın.</p>';
+                    jwtToken = null; userRole = null; localStorage.removeItem('jwtToken'); localStorage.removeItem('userRole'); updateUIBasedOnAuthState();
+                } else if (response.status === 404) {
+                    if(stocksOutput) stocksOutput.innerHTML = `<p class="message error">'${escapeHtml(ticker)}' sembolüne sahip hisse senedi bulunamadı.</p>`;
+                } else {
+                    const errorText = await response.text();
+                    if(stocksOutput) stocksOutput.innerHTML = `<p class="message error">Hata: ${response.status} - ${escapeHtml(errorText) || response.statusText}</p>`;
+                }
+            } catch (error) {
+                console.error('Get Single Stock error:', error);
+                if(stocksOutput) stocksOutput.innerHTML = '<p class="message error">Hisseyi getirirken bir ağ hatası oluştu.</p>';
+            }
+        });
+    }
+
+    if (getHtmlReportButton) {
+        getHtmlReportButton.addEventListener('click', async () => {
+            if (stocksOutput) stocksOutput.innerHTML = '';
+            if (reportOutput) {
+                 reportOutput.innerHTML = 'HTML Raporu Yükleniyor...';
+                 reportOutput.style.display = 'block';
+            }
+            // Hide preference section when showing HTML report
+            if (stockPreferenceSection) stockPreferenceSection.style.display = 'none';
+            try {
+                const response = await fetch(`${apiUrl}/stocks/report/html`, {
+                    method: 'GET', headers: { 'Accept': 'text/html' }
+                });
+                if (response.ok) {
+                    const htmlText = await response.text();
+                    if (reportOutput) reportOutput.innerHTML = `<iframe srcdoc="${escapeHtml(htmlText)}" style="width:100%; height: 600px; border:1px solid #ccc;"></iframe>`;
+                } else {
+                    const errorText = await response.text();
+                    if (reportOutput) reportOutput.innerHTML = `<p class="message error">HTML Raporu alınırken hata: ${response.status} - ${escapeHtml(errorText) || response.statusText}</p>`;
+                }
+            } catch (error) {
+                console.error('Get HTML Report error:', error);
+                if (reportOutput) reportOutput.innerHTML = '<p class="message error">HTML Raporu alınırken bir ağ hatası oluştu.</p>';
+            }
+        });
+    }
+
+    // Admin Paneli Olay Dinleyicileri
+    if (trackSymbolForm) {
+        trackSymbolForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            if (!jwtToken || userRole !== 'Admin') { displayMessage(trackMessage, 'Bu işlem için Admin yetkisi gereklidir.', false); return; }
+            const tickerSymbol = newTickerSymbolInput.value.trim().toUpperCase();
+            if (!tickerSymbol) { displayMessage(trackMessage, 'Lütfen bir sembol girin.', false); return; }
+            displayMessage(trackMessage, `'${escapeHtml(tickerSymbol)}' takibe alınıyor...`, true);
+            try {
+                const response = await fetch(`${apiUrl}/stocks/track`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${jwtToken}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tickerSymbol })
+                });
+                const responseData = await response.json();
+                if (response.ok) {
+                    displayMessage(trackMessage, responseData.message || `'${escapeHtml(tickerSymbol)}' başarıyla işlendi.`, true);
+                    newTickerSymbolInput.value = '';
+                    if (getTrackedSymbolsButton) getTrackedSymbolsButton.click();
+                } else {
+                    displayMessage(trackMessage, responseData.message || `Hata: ${response.statusText}`, false);
+                }
+            } catch (error) {
+                console.error('Track symbol error:', error);
+                displayMessage(trackMessage, 'Sembol takibe alınırken bir ağ hatası oluştu.', false);
+            }
+        });
+    }
+
+    if (getTrackedSymbolsButton) {
+        getTrackedSymbolsButton.addEventListener('click', async () => {
+            if (!jwtToken || userRole !== 'Admin') { if(trackedSymbolsList) trackedSymbolsList.innerHTML = '<li>Bu işlem için Admin yetkisi gereklidir.</li>'; return; }
+            if(trackedSymbolsList) trackedSymbolsList.innerHTML = '<li>Yükleniyor...</li>';
+            displayMessage(untrackMessage, '', true);
+            try {
+                const response = await fetch(`${apiUrl}/stocks/tracked-symbols`, {
+                    method: 'GET', headers: { 'Authorization': `Bearer ${jwtToken}` }
+                });
+                if (response.ok) {
+                    const symbols = await response.json();
+                    if(trackedSymbolsList) trackedSymbolsList.innerHTML = '';
+                    if (symbols.length === 0) {
+                        if(trackedSymbolsList) trackedSymbolsList.innerHTML = '<li>Takip edilen sembol bulunmuyor.</li>';
+                    } else {
+                        symbols.forEach(symbol => {
+                            const li = document.createElement('li');
+                            li.textContent = escapeHtml(symbol) + ' ';
+                            const untrackBtn = document.createElement('button');
+                            untrackBtn.textContent = 'Takipten Çıkar';
+                            untrackBtn.classList.add('untrack-btn');
+                            untrackBtn.dataset.symbol = symbol;
+                            untrackBtn.addEventListener('click', handleUntrackSymbol);
+                            li.appendChild(untrackBtn);
+                            if(trackedSymbolsList) trackedSymbolsList.appendChild(li);
+                        });
+                    }
+                } else {
+                    const errorData = await response.json();
+                    if(trackedSymbolsList) trackedSymbolsList.innerHTML = `<li>Hata: ${escapeHtml(errorData.message || response.statusText)}</li>`;
+                }
+            } catch (error) {
+                console.error('Get tracked symbols error:', error);
+                if(trackedSymbolsList) trackedSymbolsList.innerHTML = '<li>Takip edilen semboller getirilirken bir ağ hatası oluştu.</li>';
+            }
+        });
+    }
+
+
+    // === YENİ: Kullanıcı Tercihleri Formu Gönderimi (PUT) ===
+    if (preferenceForm) {
+        preferenceForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            if (!jwtToken) {
+                displayMessage(preferenceMessage, 'Bu işlem için giriş yapmalısınız.', false);
+                return;
+            }
+            const tickerSymbol = prefHiddenTickerInput.value;
+            if (!tickerSymbol) {
+                displayMessage(preferenceMessage, 'Hisse senedi sembolü bulunamadı.', false);
+                return;
+            }
+
+            const preferenceData = {
+                notes: prefNotesInput.value.trim() === '' ? null : prefNotesInput.value.trim(),
+                priceAlertUpper: prefAlertUpperInput.value ? parseFloat(prefAlertUpperInput.value) : null,
+                priceAlertLower: prefAlertLowerInput.value ? parseFloat(prefAlertLowerInput.value) : null,
+            };
+            // The redundant `if (preferenceData.notes === "") preferenceData.notes = null;` was removed as ternary already handles it.
+
+            displayMessage(preferenceMessage, `'${escapeHtml(tickerSymbol)}' için tercihler kaydediliyor...`, true);
+
+            try {
+                const response = await fetch(`${apiUrl}/user/preferences/${tickerSymbol}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': `Bearer ${jwtToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(preferenceData)
+                });
+                const responseData = await response.json();
+
+                if (response.ok) { // 200 OK veya 201 Created
+                    displayMessage(preferenceMessage, response.status === 201 ? 'Tercihler başarıyla oluşturuldu.' : 'Tercihler başarıyla güncellendi.', true);
+                    // Optionally hide the form after successful save
+                    // stockPreferenceSection.style.display = 'none';
+                } else {
+                    const errorMsg = responseData.message || (responseData.errors ? JSON.stringify(responseData.errors) : `Hata: ${response.statusText}`);
+                    displayMessage(preferenceMessage, errorMsg, false);
+                }
+            } catch (error) {
+                console.error('Save preferences error:', error);
+                displayMessage(preferenceMessage, 'Tercihler kaydedilirken bir ağ hatası oluştu.', false);
+            }
+        });
+    }
+
+    // === YENİ: Kullanıcı Tercihlerini Silme Butonu (DELETE) ===
+    if (deletePreferenceButton) {
+        deletePreferenceButton.addEventListener('click', async () => {
+            if (!jwtToken) {
+                displayMessage(preferenceMessage, 'Bu işlem için giriş yapmalısınız.', false);
+                return;
+            }
+            const tickerSymbol = prefHiddenTickerInput.value;
+            if (!tickerSymbol) {
+                displayMessage(preferenceMessage, 'Hisse senedi sembolü bulunamadı.', false);
+                return;
+            }
+
+            if (!confirm(`'${escapeHtml(tickerSymbol)}' için tüm tercihleri silmek istediğinizden emin misiniz?`)) {
+                return;
+            }
+            displayMessage(preferenceMessage, `'${escapeHtml(tickerSymbol)}' için tercihler siliniyor...`, true);
+
+            try {
+                const response = await fetch(`${apiUrl}/user/preferences/${tickerSymbol}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${jwtToken}` }
+                });
+
+                if (response.ok) { // 204 No Content veya 200 OK
+                    displayMessage(preferenceMessage, `'${escapeHtml(tickerSymbol)}' için tercihler başarıyla silindi.`, true);
+                    prefNotesInput.value = '';
+                    prefAlertUpperInput.value = '';
+                    prefAlertLowerInput.value = '';
+                    if (stockPreferenceSection) stockPreferenceSection.style.display = 'none';
+                } else if (response.status === 404) {
+                     displayMessage(preferenceMessage, `'${escapeHtml(tickerSymbol)}' için silinecek tercih bulunamadı.`, false);
+                }
+                else {
+                    let errorMsg = `Hata: ${response.statusText}`;
+                    try {
+                        const errorData = await response.json();
+                        errorMsg = errorData.message || (errorData.errors ? JSON.stringify(errorData.errors) : errorMsg);
+                    } catch (e) { /* JSON parse hatası olursa ignore et, text olarak kullan */ }
+                    displayMessage(preferenceMessage, errorMsg, false);
+                }
+            } catch (error) {
+                console.error('Delete preferences error:', error);
+                displayMessage(preferenceMessage, 'Tercihler silinirken bir ağ hatası oluştu.', false);
+            }
+        });
+    }
+
+
+    // --- Fonksiyon Tanımları ---
+    async function handleUntrackSymbol(event) {
+        const symbolToUntrack = event.target.dataset.symbol;
+        if (!symbolToUntrack || !jwtToken || userRole !== 'Admin') { displayMessage(untrackMessage, 'Bu işlem için Admin yetkisi veya geçerli sembol gereklidir.', false); return; }
+        if (!confirm(`'${escapeHtml(symbolToUntrack)}' sembolünü takipten çıkarmak istediğinizden emin misiniz?`)) { return; }
+        displayMessage(untrackMessage, `'${escapeHtml(symbolToUntrack)}' takipten çıkarılıyor...`, true);
+        try {
+            const response = await fetch(`${apiUrl}/stocks/track/${symbolToUntrack}`, {
+                method: 'DELETE', headers: { 'Authorization': `Bearer ${jwtToken}` }
+            });
+            if (response.ok) {
+                const responseData = await response.json();
+                displayMessage(untrackMessage, responseData.message || `'${escapeHtml(symbolToUntrack)}' başarıyla takipten çıkarıldı.`, true);
+                if (getTrackedSymbolsButton) getTrackedSymbolsButton.click();
+            } else {
+                 const errorData = await response.json().catch(() => ({ message: response.statusText }));
+                displayMessage(untrackMessage, errorData.message || `Hata: ${response.statusText}`, false);
+            }
+        } catch (error) {
+            console.error('Untrack symbol error:', error);
+            displayMessage(untrackMessage, 'Sembol takipten çıkarılırken bir ağ hatası oluştu.', false);
+        }
+    }
+
+    // XML'i tablo olarak gösterme fonksiyonunu güncelle (Tercihleri Düzenle Butonu ekle)
+    
+   function parseAndDisplayXmlAsTable(xmlString, outputElement, isSingleStock = false) {
+    try {
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(xmlString, "application/xml");
+
+        const parseErrorNode = xmlDoc.querySelector("parsererror");
+        if (parseErrorNode) {
+            console.error("XML Parse Error:", parseErrorNode.textContent);
+            outputElement.innerHTML = `<p class="message error">XML parse hatası oluştu. Detaylar konsolda.</p>`;
+            return;
+        }
+
+        let stockNodes = [];
+        const rootElement = xmlDoc.documentElement;
+
+        if (rootElement.nodeName === "Stock") {
+            stockNodes = [rootElement];
+        } else if (rootElement.nodeName === "StockDataFeed" || rootElement.nodeName === "FilteredStockData") {
+            stockNodes = rootElement.getElementsByTagName("Stock");
+        }
+
+        if (stockNodes.length === 0) {
+            const messageNode = rootElement.getElementsByTagName("Message")[0];
+            if (messageNode) {
+                outputElement.innerHTML = `<p class="message">${escapeHtml(messageNode.textContent)}</p>`;
+            } else {
+                outputElement.innerHTML = `<p class="message">Gösterilecek hisse senedi verisi bulunamadı veya beklenmedik XML formatı.</p>`;
+            }
+            return;
+        }
+
+        // --- DEĞİŞİKLİK 1: Başlıklara "Tercihler" eklendi ---
+        let tableHtml = '<table class="stock-table"><thead><tr>';
+        const headers = ["Sembol", "Şirket", "Fiyat", "Değişim", "% Değişim", "Hacim", "Son Güncelleme", "Açıklama", "Tercihler"];
+        headers.forEach(header => tableHtml += `<th>${escapeHtml(header)}</th>`);
+        tableHtml += '</tr></thead><tbody>';
+
+        for (let i = 0; i < stockNodes.length; i++) {
+            const stockNode = stockNodes[i];
+            const getElementText = (elementName) => {
+                const node = stockNode.getElementsByTagName(elementName)[0];
+                return node ? node.textContent : '';
+            };
+            const descriptionNode = stockNode.getElementsByTagName("Description")[0];
+            const description = descriptionNode ? (descriptionNode.firstChild && descriptionNode.firstChild.nodeType === Node.CDATA_SECTION_NODE ? descriptionNode.firstChild.nodeValue : descriptionNode.textContent) : '';
+            const ticker = stockNode.getAttribute("TickerSymbol") || '';
+            const company = getElementText("CompanyName");
+            const price = getElementText("CurrentPrice");
+            const change = getElementText("Change");
+            const percentChange = getElementText("PercentChange");
+            const volume = getElementText("Volume");
+            const updated = getElementText("LastUpdated");
+            
+            // --- DEĞİŞİKLİK 2: Tablo satırına "Düzenle" butonu eklendi ---
+            tableHtml += `<tr>
+                            <td><a href="#" class="stock-link" data-ticker="${escapeHtml(ticker)}">${escapeHtml(ticker)}</a></td>
+
+                            <td>${escapeHtml(ticker)}</td>
+                            <td>${escapeHtml(company)}</td>
+                            <td>${escapeHtml(price)}</td>
+                            <td>${escapeHtml(change)}</td>
+                            <td>${escapeHtml(percentChange)}</td>
+                            <td>${escapeHtml(volume)}</td>
+                            <td>${escapeHtml(updated ? new Date(updated).toLocaleString('tr-TR', { dateStyle: 'short', timeStyle: 'short' }) : '')}</td>
+                            <td>${escapeHtml(description)}</td>
+                            <td><button class="edit-prefs-btn" data-ticker="${escapeHtml(ticker)}">Düzenle</button></td>
+                          </tr>`;
+        }
+
+        tableHtml += '</tbody></table>';
+        outputElement.innerHTML = tableHtml;
+
+        // --- DEĞİŞİKLİK 3: Dinamik olarak eklenen butonlara olay dinleyicisi atandı ---
+        // Bu, tablo DOM'a eklendikten HEMEN SONRA yapılmalıdır.
+        outputElement.querySelectorAll('.edit-prefs-btn').forEach(button => {
+            button.addEventListener('click', handleEditPreferences);
+        });
+
+        outputElement.querySelectorAll('.stock-link').forEach(link => {
+    link.addEventListener('click', (event) => {
+        event.preventDefault();
+        showStockChart(link.dataset.ticker);
+    });
+});
+    } catch (e) {
+        console.error("XML parse and display error:", e);
+        outputElement.innerHTML = `<p class="message error">XML verisi tablo olarak görüntülenirken bir hata oluştu: ${escapeHtml(e.message)}</p>`;
+    }
+    }
+
+    // === YENİ: Tercihleri Düzenleme Formunu Açma ve Doldurma ===
+    async function handleEditPreferences(event) {
+        if (!jwtToken) {
+            alert('Lütfen önce giriş yapın.');
+            // Optionally, try to show login message or redirect to login
+            if (loginMessage) displayMessage(loginMessage, 'Tercihleri düzenlemek için giriş yapmalısınız.', false);
+            if (authSection) authSection.style.display = 'block'; // Show login section
+            return;
+        }
+        const ticker = event.target.dataset.ticker;
+        if (!ticker) return;
+
+        if (preferenceMessage) displayMessage(preferenceMessage, '', true); // Önceki mesajları temizle
+        if (prefTickerSymbolDisplay) prefTickerSymbolDisplay.textContent = ticker;
+        if (prefHiddenTickerInput) prefHiddenTickerInput.value = ticker;
+
+        // Formu temizle
+        if (prefNotesInput) prefNotesInput.value = '';
+        if (prefAlertUpperInput) prefAlertUpperInput.value = '';
+        if (prefAlertLowerInput) prefAlertLowerInput.value = '';
+
+        try {
+            const response = await fetch(`${apiUrl}/user/preferences/${ticker}`, {
+                method: 'GET',
+                headers: { 'Authorization': `Bearer ${jwtToken}` }
+            });
+            if (response.ok) {
+                const prefData = await response.json();
+                if (prefNotesInput) prefNotesInput.value = prefData.notes || '';
+                if (prefAlertUpperInput) prefAlertUpperInput.value = prefData.priceAlertUpper || ''; // API null dönerse boş string olacak
+                if (prefAlertLowerInput) prefAlertLowerInput.value = prefData.priceAlertLower || ''; // API null dönerse boş string olacak
+            } else if (response.status === 404) {
+                // No existing preferences, form remains empty which is fine.
+                // Optionally display a message that no preferences exist yet
+                // displayMessage(preferenceMessage, `'${escapeHtml(ticker)}' için mevcut tercih bulunamadı. Yeni oluşturabilirsiniz.`, true);
+            }
+            else if (response.status === 401) {
+                displayMessage(preferenceMessage, 'Yetkisiz erişim. Lütfen tekrar giriş yapın.', false);
+                 jwtToken = null; userRole = null; localStorage.removeItem('jwtToken'); localStorage.removeItem('userRole'); updateUIBasedOnAuthState();
+            }
+            else {
+                displayMessage(preferenceMessage, 'Tercihler getirilirken hata oluştu.', false);
+            }
+        } catch (error) {
+            console.error('Get preference for edit error:', error);
+            displayMessage(preferenceMessage, 'Tercihler getirilirken bir ağ hatası oluştu.', false);
+        }
+
+        if (stockPreferenceSection) stockPreferenceSection.style.display = 'block'; // Tercih bölümünü göster
+        window.scrollTo(0, stockPreferenceSection.offsetTop - 20); // Scroll to the preference section
+    }
+
+    // İlk UI Güncellemesi
+    updateUIBasedOnAuthState();
+}       
+);<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Borsa Takip Sistemi</title>
+    <link rel="stylesheet" href="style.css">
+    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+
+</head>
+<body>
+    <header>
+        <h1>Borsa Verileri </h1>
+        <button id="logout-button" style="display:none;">Çıkış Yap</button>
+    </header>
+
+    <main>
+        <section id="auth-section">
+            <h2>Giriş Yap / Kayıt Ol</h2>
+            <div class="form-container">
+                <h3>Kayıt Ol</h3>
+                <form id="register-form">
+                    <label for="reg-username">Kullanıcı Adı:</label>
+                    <input type="text" id="reg-username" name="reg-username" required>
+                    <label for="reg-password">Şifre:</label>
+                    <input type="password" id="reg-password" name="reg-password" required>
+                    <button type="submit">Kayıt Ol</button>
+                    <p id="register-message" class="message"></p>
+                </form>
+            </div>
+            <div class="form-container">
+                <h3>Giriş Yap</h3>
+                <form id="login-form">
+                    <label for="login-username">Kullanıcı Adı:</label>
+                    <input type="text" id="login-username" name="login-username" required>
+                    <label for="login-password">Şifre:</label>
+                    <input type="password" id="login-password" name="login-password" required>
+                    <button type="submit">Giriş Yap</button>
+                    <p id="login-message" class="message"></p>
+                </form>
+            </div>
+        </section>
+
+        <section id="stocks-section" style="display:none;">
+            <h2>Hisse Senetleri</h2>
+            <div class="controls">
+                <button id="get-all-stocks-button">Tüm Hisseleri Getir</button>
+                <input type="text" id="ticker-symbol-input" placeholder="Hisse Sembolü (örn: IBM)">
+                <button id="get-single-stock-button">Tek Hisseyi Getir</button>
+                <button id="get-html-report-button">HTML Raporu Görüntüle</button>
+            </div>
+            <div id="stocks-output" class="output-area">
+                <!-- Hisse senedi verileri buraya gelecek -->
+            </div>  
+            
+            <!-- Tercih paneli (Gizli başlar) -->
+            <section id="stock-preference-section" style="display:none; margin-top:2rem;">
+                <h3>
+                    <span id="pref-ticker-symbol"></span> İçin Tercihler
+                </h3>
+                <form id="preference-form">
+                    <input type="hidden" id="pref-hidden-ticker">
+                    <div>
+                        <label for="pref-notes">Notlar:</label>
+                        <textarea id="pref-notes" rows="4"></textarea>
+                    </div>
+                    <div>
+                        <label for="pref-alert-upper">Üst Fiyat Alarmı:</label>
+                        <input type="number" id="pref-alert-upper" step="0.01">
+                    </div>
+                    <div>
+                        <label for="pref-alert-lower">Alt Fiyat Alarmı:</label>
+                        <input type="number" id="pref-alert-lower" step="0.01">
+                    </div>
+                    <button type="submit">Tercihleri Kaydet (PUT)</button>
+                    <button type="button" id="delete-preference-button" style="background-color: #d9534f;">Tercihleri Sil (DELETE)</button>
+                    <p id="preference-message" class="message"></p>
+                </form>
+            </section>
+
+            <div id="report-output" class="output-area" style="display:none;">
+                <!-- HTML Raporu iframe içinde buraya gelecek -->
+            </div>
+        </section>
+
+        <section id="admin-panel-section" style="display:none;">
+            <h2>Admin Paneli</h2>
+            <div class="form-container">
+                <h3>Yeni Hisse Sembolü Takip Et</h3>
+                <form id="track-symbol-form">
+                    <label for="new-ticker-symbol">Takip Edilecek Sembol:</label>
+                    <input type="text" id="new-ticker-symbol" name="new-ticker-symbol" required>
+                    <button type="submit">Takibe Al</button>
+                    <p id="track-message" class="message"></p>
+                </form>
+            </div>
+            <div class="form-container">
+                <h3>Takip Edilen Semboller</h3>
+                <button id="get-tracked-symbols-button">Takip Listesini Göster</button>
+                <ul id="tracked-symbols-list">
+                    <!-- Takip edilen semboller buraya gelecek -->
+                </ul>
+                <p id="untrack-message" class="message"></p>
+            </div>
+        </section>
+    </main>
+     <div class="spacer"></div>
+    <div id="chart-modal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <span class="close-button">×</span>
+            <h3 id="chart-modal-title"></h3>
+            <!-- TradingView Widget'ının GÖVDESİ buraya gelecek -->
+            <div id="chart-container" class="tradingview-widget-container">
+            <div id="tradingview-chart-widget" style="height: 500px;"></div>
+            <div class="tradingview-widget-copyright">
+                <a href="https://www.tradingview.com/" rel="noopener nofollow" target="_blank">
+                    <span class="blue-text">Track all markets on TradingView</span>
+                </a>
+            </div>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <p>© 2025 Borsa Takip Projesi</p>
+    </footer>
+   
+
+    <script src="app.js"></script>
+</body>
+</html>

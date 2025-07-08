@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>StockMarket.Api</name>
+    </assembly>
+    <members>
+        <member name="M:StockMarket.Api.Controllers.UserPreferencesController.GetAllUserPreferences">
+            <summary>
+            Gets all preferences for the authenticated user.
+            </summary>
+        </member>
+        <member name="M:StockMarket.Api.Controllers.UserPreferencesController.GetPreferenceForTicker(System.String)">
+            <summary>
+            Gets the preference for a specific stock for the authenticated user.
+            </summary>
+            <param name="tickerSymbol">The stock ticker symbol.</param>
+        </member>
+        <member name="M:StockMarket.Api.Controllers.UserPreferencesController.CreateOrUpdatePreference(System.String,StockMarket.Api.Models.StockUserPreferenceCreateUpdateDto)">
+            <summary>
+            Creates or updates the preference for a specific stock for the authenticated user.
+            </summary>
+            <param name="tickerSymbol">The stock ticker symbol.</param>
+            <param name="preferenceDto">The preference data.</param>
+        </member>
+        <member name="M:StockMarket.Api.Controllers.UserPreferencesController.DeletePreference(System.String)">
+            <summary>
+            Deletes the preference for a specific stock for the authenticated user.
+            </summary>
+            <param name="tickerSymbol">The stock ticker symbol.</param>
+        </member>
+    </members>
+</doc>

@@ -1,0 +1,35 @@
+<!-- StockMarket.Api/stockdata.xsd -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           targetNamespace="http://www.example.com/stockdata/v1"
+           xmlns:tns="http://www.example.com/stockdata/v1"
+           elementFormDefault="qualified">
+
+    <xs:element name="StockDataFeed">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="Stock" type="tns:StockType" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+
+    <xs:complexType name="StockType">
+        <xs:sequence>
+            <xs:element name="CompanyName" type="xs:string"/>
+            <xs:element name="CurrentPrice" type="xs:decimal"/>
+            <xs:element name="Change" type="xs:decimal"/>
+            <xs:element name="PercentChange" type="xs:decimal"/>
+            <xs:element name="Volume" type="xs:long"/>
+            <xs:element name="LastUpdated" type="xs:dateTime"/>
+            <xs:element name="Description" type="xs:string"/>
+        </xs:sequence>
+        <xs:attribute name="TickerSymbol" type="tns:TickerSymbolType" use="required"/>
+    </xs:complexType>
+
+    <xs:simpleType name="TickerSymbolType">
+        <xs:restriction base="xs:string">
+            <xs:pattern value="[A-Z]{1,5}"/> <!-- Örnek: 1-5 arası büyük harf -->
+            <xs:maxLength value="5"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+</xs:schema>

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Borsa Takip Sistemi</title>
+    <link rel="stylesheet" href="style.css">
+    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+
+</head>
+<body>
+    <header>
+        <h1>Borsa Verileri </h1>
+        <button id="logout-button" style="display:none;">Çıkış Yap</button>
+    </header>
+
+    <main>
+        <section id="auth-section">
+            <h2>Giriş Yap / Kayıt Ol</h2>
+            <div class="form-container">
+                <h3>Kayıt Ol</h3>
+                <form id="register-form">
+                    <label for="reg-username">Kullanıcı Adı:</label>
+                    <input type="text" id="reg-username" name="reg-username" required>
+                    <label for="reg-password">Şifre:</label>
+                    <input type="password" id="reg-password" name="reg-password" required>
+                    <button type="submit">Kayıt Ol</button>
+                    <p id="register-message" class="message"></p>
+                </form>
+            </div>
+            <div class="form-container">
+                <h3>Giriş Yap</h3>
+                <form id="login-form">
+                    <label for="login-username">Kullanıcı Adı:</label>
+                    <input type="text" id="login-username" name="login-username" required>
+                    <label for="login-password">Şifre:</label>
+                    <input type="password" id="login-password" name="login-password" required>
+                    <button type="submit">Giriş Yap</button>
+                    <p id="login-message" class="message"></p>
+                </form>
+            </div>
+        </section>
+
+        <section id="stocks-section" style="display:none;">
+            <h2>Hisse Senetleri</h2>
+            <div class="controls">
+                <button id="get-all-stocks-button">Tüm Hisseleri Getir</button>
+                <input type="text" id="ticker-symbol-input" placeholder="Hisse Sembolü (örn: IBM)">
+                <button id="get-single-stock-button">Tek Hisseyi Getir</button>
+                <button id="get-html-report-button">HTML Raporu Görüntüle</button>
+            </div>
+            <div id="stocks-output" class="output-area">
+                <!-- Hisse senedi verileri buraya gelecek -->
+            </div>  
+            
+            <!-- Tercih paneli (Gizli başlar) -->
+            <section id="stock-preference-section" style="display:none; margin-top:2rem;">
+                <h3>
+                    <span id="pref-ticker-symbol"></span> İçin Tercihler
+                </h3>
+                <form id="preference-form">
+                    <input type="hidden" id="pref-hidden-ticker">
+                    <div>
+                        <label for="pref-notes">Notlar:</label>
+                        <textarea id="pref-notes" rows="4"></textarea>
+                    </div>
+                    <div>
+                        <label for="pref-alert-upper">Üst Fiyat Alarmı:</label>
+                        <input type="number" id="pref-alert-upper" step="0.01">
+                    </div>
+                    <div>
+                        <label for="pref-alert-lower">Alt Fiyat Alarmı:</label>
+                        <input type="number" id="pref-alert-lower" step="0.01">
+                    </div>
+                    <button type="submit">Tercihleri Kaydet (PUT)</button>
+                    <button type="button" id="delete-preference-button" style="background-color: #d9534f;">Tercihleri Sil (DELETE)</button>
+                    <p id="preference-message" class="message"></p>
+                </form>
+            </section>
+
+            <div id="report-output" class="output-area" style="display:none;">
+                <!-- HTML Raporu iframe içinde buraya gelecek -->
+            </div>
+        </section>
+
+        <section id="admin-panel-section" style="display:none;">
+            <h2>Admin Paneli</h2>
+            <div class="form-container">
+                <h3>Yeni Hisse Sembolü Takip Et</h3>
+                <form id="track-symbol-form">
+                    <label for="new-ticker-symbol">Takip Edilecek Sembol:</label>
+                    <input type="text" id="new-ticker-symbol" name="new-ticker-symbol" required>
+                    <button type="submit">Takibe Al</button>
+                    <p id="track-message" class="message"></p>
+                </form>
+            </div>
+            <div class="form-container">
+                <h3>Takip Edilen Semboller</h3>
+                <button id="get-tracked-symbols-button">Takip Listesini Göster</button>
+                <ul id="tracked-symbols-list">
+                    <!-- Takip edilen semboller buraya gelecek -->
+                </ul>
+                <p id="untrack-message" class="message"></p>
+            </div>
+        </section>
+    </main>
+     <div class="spacer"></div>
+    <div id="chart-modal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <span class="close-button">×</span>
+            <h3 id="chart-modal-title"></h3>
+            <!-- TradingView Widget'ının GÖVDESİ buraya gelecek -->
+            <div id="chart-container" class="tradingview-widget-container">
+            <div id="tradingview-chart-widget" style="height: 500px;"></div>
+            <div class="tradingview-widget-copyright">
+                <a href="https://www.tradingview.com/" rel="noopener nofollow" target="_blank">
+                    <span class="blue-text">Track all markets on TradingView</span>
+                </a>
+            </div>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <p>© 2025 Borsa Takip Projesi</p>
+    </footer>
+   
+
+    <script src="app.js"></script>
+</body>
+</html>

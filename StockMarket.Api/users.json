@@ -1,0 +1,56 @@
+[
+  {
+    "Id": "0d517792-2ff5-4916-982b-4d0d0bb24a80",
+    "Username": "admin",
+    "PasswordHash": "$2a$11$b.HGXiGSTBoYeloQvOKRbeponOSDC2pa/pFn.KCF3KBPgsqdQ88Pu",
+    "Role": "Admin"
+  },
+  {
+    "Id": "9696fd88-efa3-458a-bccf-00564672d3c8",
+    "Username": "testuser",
+    "PasswordHash": "$2a$11$sAqedvRVwgdkL5YbB7NAt.Jc2QMM3GKjXGZ3hMDqHYVvK0MSj2H6.",
+    "Role": "User"
+  },
+  {
+    "Id": "360deeca-93b3-4a03-9a66-e8afcf6df7e2",
+    "Username": "furkannuzum",
+    "PasswordHash": "$2a$11$9F3WQKgzEex/tmAmqpzmkeTk/BXVdb//wqy/6Dfi5Z62kamZqq.S.",
+    "Role": "User"
+  },
+  {
+    "Id": "8451afe4-cd1f-450c-8e29-bee91f5bd951",
+    "Username": "deneme123",
+    "PasswordHash": "$2a$11$deLYRJAAHK/LoQs9vU9b8eGkZ09Ra1LvPr9YhKG.Z1p3GkGs.N5FS",
+    "Role": "User"
+  },
+  {
+    "Id": "8655eb1c-a7ad-4466-ad71-bd570c4ec4f2",
+    "Username": "testuser23",
+    "PasswordHash": "$2a$11$RlyhegSHxWjYAlBCF8KdZO0bBPHm9UaczqsKHMB93N8/7Ue9.X50y",
+    "Role": "User"
+  },
+  {
+    "Id": "a085b1f2-469d-4f28-87ca-ba76516ced59",
+    "Username": "testuser123",
+    "PasswordHash": "$2a$11$hSvrFHix5pg4p.jYgVAFs.4iG9Ywb5SkrsVNGuF.lxmXsdsMOdJGu",
+    "Role": "User"
+  },
+  {
+    "Id": "daf463ee-01c1-4787-bf0d-bdff7a553985",
+    "Username": "deneme11111",
+    "PasswordHash": "$2a$11$aNaIjs/NdsVOtgpzbNHjueWwxZfgiss6swqmIK/FS9JPT1M5mxFHm",
+    "Role": "User"
+  },
+  {
+    "Id": "8046e13e-263a-41a9-8666-ad63d658a931",
+    "Username": "furkan123",
+    "PasswordHash": "$2a$11$JBwU90e9WbEnyEoKHXCU8OdTYKYaFcggixiOym0gPCPrun1.Po67y",
+    "Role": "User"
+  },
+  {
+    "Id": "6d48d379-b157-4b94-91b5-6820c0756d1e",
+    "Username": "testuserqwe",
+    "PasswordHash": "$2a$11$eX4MQH7RGZ7ur2ukBRJ2MuQ4ABRHmn9a.JOwjTecfXnjRob/yebDC",
+    "Role": "User"
+  }
+]
